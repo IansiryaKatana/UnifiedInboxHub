@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { Button } from "@/components/ui/button";
 
 type LegalPageLayoutProps = {
   title: string;
@@ -9,18 +10,26 @@ type LegalPageLayoutProps = {
 export function LegalPageLayout({ title, children }: LegalPageLayoutProps) {
   return (
     <div className="min-h-[100dvh] bg-white text-neutral-950 antialiased font-sans flex flex-col">
-      <header className="border-b border-neutral-200 px-4 py-4 sm:px-8 lg:px-12 shrink-0">
-        <div className="max-w-3xl mx-auto w-full flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <p className="text-xs font-medium uppercase tracking-wider text-neutral-500">Unified Inbox Hub</p>
-            <h1 className="text-xl sm:text-2xl font-bold tracking-tight mt-1">{title}</h1>
-          </div>
-          <Link
-            to="/"
-            className="text-sm font-medium text-neutral-600 hover:text-neutral-950 underline-offset-4 hover:underline shrink-0 sm:mt-1"
-          >
-            Back to home
+      <header className="border-b border-neutral-200 shrink-0 px-4 py-4 sm:px-8 lg:px-12">
+        <div className="relative mx-auto flex min-h-10 w-full max-w-3xl items-center justify-between gap-3">
+          <Link to="/" className="relative z-10 shrink-0" aria-label="Unified Inbox Hub">
+            <img
+              src="/logo dark.png"
+              alt=""
+              className="h-8 w-auto max-h-9 max-w-[min(100%,220px)] object-contain object-left sm:h-9"
+              width={220}
+              height={36}
+              decoding="async"
+            />
           </Link>
+
+          <h1 className="pointer-events-none absolute left-1/2 top-1/2 w-[min(100%,18rem)] -translate-x-1/2 -translate-y-1/2 text-center text-lg font-bold leading-tight tracking-tight sm:w-auto sm:max-w-[calc(100%-14rem)] sm:text-xl md:text-2xl">
+            {title}
+          </h1>
+
+          <Button variant="outline" size="sm" className="relative z-10 shrink-0" asChild>
+            <Link to="/">Back to home</Link>
+          </Button>
         </div>
       </header>
       <main className="flex-1 px-4 py-8 sm:px-8 lg:px-12 pb-12">

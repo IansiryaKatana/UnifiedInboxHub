@@ -19,7 +19,7 @@ function ensureVapid(): boolean {
   if (vapidConfigured) return true;
   const publicKey = Deno.env.get("VAPID_PUBLIC_KEY")?.trim();
   const privateKey = Deno.env.get("VAPID_PRIVATE_KEY")?.trim();
-  const subject = Deno.env.get("VAPID_SUBJECT")?.trim() || "mailto:support@replyspot.app";
+  const subject = Deno.env.get("VAPID_SUBJECT")?.trim() || "mailto:support@unifiedinboxhub.com";
   if (!publicKey || !privateKey) {
     console.warn("push-notify: VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set; skipping web push");
     return false;

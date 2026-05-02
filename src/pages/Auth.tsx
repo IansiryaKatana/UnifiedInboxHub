@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Mail, Loader2, Eye, EyeOff } from "lucide-react";
+import { Loader2, Eye, EyeOff } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { authBridge } from "@/integrations/auth";
 import { useAuth } from "@/hooks/useAuth";
@@ -77,9 +77,15 @@ export default function Auth() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-soft via-background to-background p-4">
       <div className="w-full max-w-md">
         <div className="flex items-center justify-center gap-2 mb-8">
-          <div className="size-10 rounded-xl bg-primary grid place-items-center">
-            <Mail className="size-5 text-primary-foreground" />
-          </div>
+          <img
+            src="/pwa-192.png"
+            alt=""
+            width={40}
+            height={40}
+            className="size-10 rounded-xl object-cover shrink-0"
+            decoding="async"
+            aria-hidden
+          />
           <h1 className="text-2xl font-semibold tracking-tight">Inboxly</h1>
         </div>
 
