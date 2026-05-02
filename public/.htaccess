@@ -1,0 +1,11 @@
+# Unified Inbox Hub — SPA fallback for Apache / LiteSpeed (e.g. Hostinger shared hosting).
+# Serves index.html for client-side routes so /privacy, /terms, /auth load correctly on refresh or direct URL.
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+  RewriteRule ^index\.html$ - [L]
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule . /index.html [L]
+</IfModule>

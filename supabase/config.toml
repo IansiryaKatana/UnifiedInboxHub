@@ -1,0 +1,4 @@
+project_id = "wunaudeomnobojbpoprv"
+
+[functions.gmail-oauth-callback]
+verify_jwt = false

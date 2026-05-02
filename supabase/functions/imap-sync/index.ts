@@ -1,0 +1,308 @@
+// Fetch new messages from a custom IMAP mailbox into the unified inbox.
+// Uses npm:imapflow which works in Deno via npm: specifier.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { notifyNewInboundEmail } from "../_shared/push-notify.ts";
+import { ImapFlow } from "npm:imapflow@1.0.165";
+import { simpleParser } from "npm:mailparser@3.7.1";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+};
+const MAX_EMBED_ATTACHMENT_BYTES = 2_500_000;
+interface SyncedAttachment {
+  filename: string;
+  mime_type: string;
+  size: number;
+  inline: boolean;
+  content_id: string | null;
+  data_base64: string | null;
+}
+interface ImapAttempt {
+  port: number;
+  secure: boolean;
+  doSTARTTLS?: boolean;
+  label: string;
+}
+
+function decryptPassword(encrypted: string): string {
+  // Stored using base64 of XOR with project secret. Safe enough for v1; tighten with pgsodium later.
+  const key = Deno.env.get("IMAP_SECRET_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  try {
+    const bin = atob(encrypted);
+    let out = "";
+    for (let i = 0; i < bin.length; i++) {
+      out += String.fromCharCode(bin.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+    }
+    return out;
+  } catch {
+    return "";
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function sanitizeHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, "")
+    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, "")
+    .replace(/javascript:/gi, "");
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  try {
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
+    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    let userId: string | null = null;
+    if (req.headers.get("x-internal-cron") === "1") {
+      userId = req.headers.get("x-account-user-id");
+    } else {
+      const userClient = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_PUBLISHABLE_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY")!, {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: { user } } = await userClient.auth.getUser();
+      userId = user?.id ?? null;
+    }
+    if (!userId) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    const user = { id: userId };
+
+    const { account_id, max_messages } = await req.json();
+    const maxMessages: number | null = typeof max_messages === "number"
+      ? Math.max(1, Math.min(max_messages, 5000))
+      : null;
+    if (!account_id) return new Response(JSON.stringify({ error: "account_id required" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
+    const { data: account } = await supabase.from("email_accounts").select("*").eq("id", account_id).eq("user_id", user.id).single();
+    if (!account || account.provider_type !== "imap") {
+      return new Response(JSON.stringify({ error: "IMAP account not found" }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    if (!account.imap_host || !account.imap_username || !account.imap_password_encrypted) {
+      return new Response(JSON.stringify({ error: "IMAP credentials missing" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    await supabase.from("email_accounts").update({ sync_status: "syncing", last_sync_error: null }).eq("id", account_id);
+
+    const password = decryptPassword(account.imap_password_encrypted);
+    const host = String(account.imap_host).trim();
+    const username = String(account.imap_username).trim();
+    const configuredPort = account.imap_port ?? 993;
+    const configuredSecure = account.imap_use_tls !== false;
+    const attempts: ImapAttempt[] = [
+      { port: configuredPort, secure: configuredSecure, label: "configured" },
+    ];
+    if (configuredPort === 993 && configuredSecure) {
+      attempts.push({ port: 143, secure: false, doSTARTTLS: true, label: "fallback-starttls-143" });
+    } else if (configuredPort === 143 && !configuredSecure) {
+      attempts.push({ port: 993, secure: true, label: "fallback-ssl-993" });
+      attempts.push({ port: 143, secure: false, doSTARTTLS: true, label: "fallback-starttls-143" });
+    }
+
+    let client: ImapFlow | null = null;
+
+    let imported = 0;
+    let scanned = 0;
+    let lastUid = account.imap_last_uid ?? 0;
+    let connected = false;
+
+    try {
+      try {
+        let lastError = "";
+        for (const attempt of attempts) {
+          try {
+            client = new ImapFlow({
+              host,
+              port: attempt.port,
+              secure: attempt.secure,
+              doSTARTTLS: attempt.doSTARTTLS,
+              auth: { user: username, pass: password },
+              logger: false,
+            });
+            await client.connect();
+            connected = true;
+            break;
+          } catch (err) {
+            try { await client?.logout(); } catch { /* ignore */ }
+            client = null;
+            lastError = err instanceof Error ? err.message : String(err);
+          }
+        }
+        if (!connected || !client) {
+          throw new Error(lastError || "Unable to connect");
+        }
+      } catch (connErr) {
+        const cm = connErr instanceof Error ? connErr.message : String(connErr);
+        throw new Error(`IMAP connect failed (${account.imap_host}:${configuredPort}): ${cm}. Try Titan defaults: IMAP imap.titan.email:993 SSL (or 143 STARTTLS), SMTP smtp.titan.email:465 SSL (or 587 STARTTLS), username as full email, and app password if enabled.`);
+      }
+      const lock = await client.getMailboxLock("INBOX");
+      try {
+        const range = lastUid > 0 ? `${lastUid + 1}:*` : `1:*`;
+        const uids: number[] = [];
+        for await (const msg of client.fetch(range, { uid: true, envelope: true }, { uid: true })) {
+          uids.push(msg.uid);
+        }
+        const newUids = uids.filter((u) => u > lastUid).sort((a, b) => a - b);
+        const toProcess = maxMessages ? newUids.slice(0, maxMessages) : newUids;
+
+        scanned = toProcess.length;
+        for (const uid of toProcess) {
+          const { content } = await client.download(uid.toString(), undefined, { uid: true });
+          const chunks: Uint8Array[] = [];
+          for await (const chunk of content) chunks.push(chunk);
+          const buffer = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+          let off = 0;
+          for (const c of chunks) { buffer.set(c, off); off += c.length; }
+          const parsed = await simpleParser(buffer);
+
+          const fromAddr = parsed.from?.value?.[0];
+          const toAddr = parsed.to && "value" in parsed.to ? parsed.to.value?.[0] : null;
+          const sender = fromAddr?.address ?? "unknown@unknown";
+          const senderName = fromAddr?.name ?? null;
+          const recipient = toAddr?.address ?? account.email_address;
+          const subject = parsed.subject ?? null;
+          const sentAt = (parsed.date ?? new Date()).toISOString();
+          const text = parsed.text ?? "";
+          const parsedHtml = typeof parsed.html === "string" ? parsed.html : null;
+          const attachments: SyncedAttachment[] = (parsed.attachments ?? []).map((att) => {
+            const content = att.content instanceof Uint8Array ? att.content : new Uint8Array();
+            const dataBase64 = content.byteLength > 0 && content.byteLength <= MAX_EMBED_ATTACHMENT_BYTES
+              ? bytesToBase64(content)
+              : null;
+            return {
+              filename: att.filename ?? "attachment",
+              mime_type: att.contentType ?? "application/octet-stream",
+              size: att.size ?? content.byteLength ?? 0,
+              inline: (att.contentDisposition ?? "").toLowerCase() === "inline" || !!att.cid,
+              content_id: att.cid ?? null,
+              data_base64: dataBase64,
+            };
+          });
+          let html = parsedHtml ? sanitizeHtml(parsedHtml) : null;
+          if (html) {
+            for (const att of attachments) {
+              if (!att.inline || !att.content_id || !att.data_base64) continue;
+              const cidRegex = new RegExp(`cid:${att.content_id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "gi");
+              html = html.replace(cidRegex, `data:${att.mime_type};base64,${att.data_base64}`);
+            }
+          }
+          const snippet = text.slice(0, 240);
+          const messageId = parsed.messageId ?? `imap-${account_id}-${uid}`;
+          const inReply = parsed.inReplyTo ?? null;
+
+          // Find thread by Message-ID/In-Reply-To chain (simple: same subject within account)
+          let threadId: string | null = null;
+          const normSubj = (subject ?? "").replace(/^(re|fwd):\s*/i, "").trim();
+          if (normSubj) {
+            const { data: existing } = await supabase
+              .from("email_threads")
+              .select("id, message_count, unread_count")
+              .eq("account_id", account_id)
+              .ilike("subject", `%${normSubj}%`)
+              .order("last_message_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            if (existing) {
+              threadId = existing.id;
+              await supabase.from("email_threads").update({
+                last_message_at: sentAt,
+                snippet,
+                message_count: (existing.message_count ?? 0) + 1,
+                unread_count: (existing.unread_count ?? 0) + 1,
+              }).eq("id", threadId);
+            }
+          }
+          if (!threadId) {
+            const { data: newThread } = await supabase.from("email_threads").insert({
+              user_id: user.id,
+              account_id,
+              provider_thread_id: inReply ?? messageId,
+              subject,
+              snippet,
+              participants: [sender, recipient].filter(Boolean),
+              last_message_at: sentAt,
+              message_count: 1,
+              unread_count: 1,
+            }).select().single();
+            threadId = newThread?.id ?? null;
+          }
+
+          if (!threadId) continue;
+          const { data: inserted, error: insErr } = await supabase.from("emails").insert({
+            user_id: user.id,
+            account_id,
+            thread_id: threadId,
+            provider_message_id: messageId,
+            direction: "inbound",
+            sender,
+            sender_name: senderName,
+            recipient,
+            subject,
+            snippet,
+            body_text: text,
+            body_html: typeof html === "string" ? html : null,
+            attachments,
+            is_read: false,
+            sent_at: sentAt,
+          }).select("id").single();
+          if (!insErr && inserted?.id) {
+            imported++;
+            const ageMs = Date.now() - new Date(sentAt).getTime();
+            const isRecentInbound = ageMs >= 0 && ageMs < 48 * 60 * 60 * 1000;
+            if (isRecentInbound) {
+              const fromLabel = senderName ? `${senderName} (${sender})` : sender;
+              try {
+                await notifyNewInboundEmail(supabase, user.id, {
+                  emailId: inserted.id,
+                  threadId,
+                  subject,
+                  snippet,
+                  from: fromLabel,
+                });
+              } catch (e) {
+                console.error("notifyNewInboundEmail:", e);
+              }
+            }
+          }
+          if (uid > lastUid) lastUid = uid;
+        }
+      } finally {
+        lock.release();
+      }
+    } finally {
+      if (connected) await client?.logout().catch(() => {});
+    }
+
+    await supabase.from("email_accounts").update({
+      sync_status: "idle",
+      last_synced_at: new Date().toISOString(),
+      imap_last_uid: lastUid,
+    }).eq("id", account_id);
+
+    return new Response(JSON.stringify({ ok: true, imported, last_uid: lastUid, scanned }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("imap-sync error:", msg);
+    // best-effort error capture
+    try {
+      const body = await req.clone().json().catch(() => ({}));
+      if (body?.account_id) {
+        const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+        await supabase.from("email_accounts").update({ sync_status: "error", last_sync_error: msg.slice(0, 500) }).eq("id", body.account_id);
+      }
+    } catch { /* ignore */ }
+    return new Response(JSON.stringify({ ok: false, error: msg }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  }
+});
