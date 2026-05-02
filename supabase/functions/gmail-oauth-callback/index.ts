@@ -20,18 +20,35 @@ function jsonForInlineJsonScript(obj: Record<string, unknown>): string {
   return JSON.stringify(obj).replace(/</g, "\\u003c");
 }
 
-function popupResponse(message: string, ok: boolean, returnTo: string, accountId?: string) {
-  const payloadObj: Record<string, unknown> = {
-    type: "gmail-oauth",
-    ok,
-    message: message.slice(0, 300),
-    account_id: accountId ?? null,
-    return_to: returnTo,
-  };
-  const inlinePayload = jsonForInlineJsonScript(payloadObj);
+/** Popup flow: Supabase sometimes serves HTML without executable scripts in some browsers; redirect to same-origin bridge so postMessage + close always run. */
+function tryRedirectToBridge(
+  popupFlow: boolean,
+  returnTo: string,
+  payload: Record<string, unknown>,
+): Response | null {
+  if (!popupFlow || !/^https?:\/\//.test(returnTo)) return null;
+  try {
+    const origin = new URL(returnTo).origin;
+    const hash = encodeURIComponent(JSON.stringify(payload));
+    if (hash.length > 60000) return null;
+    const location = `${origin}/gmail-oauth-popup-result.html#${hash}`;
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: location,
+        "Cache-Control": "no-store, max-age=0",
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
+function popupResponseHtml(payload: Record<string, unknown>, ok: boolean, returnTo: string) {
+  const inlinePayload = jsonForInlineJsonScript(payload);
   const title = ok ? "Gmail connected" : "Could not connect Gmail";
   const lead = ok
-    ? "Returning you to the app…"
+    ? "Returning you to the app..."
     : "You can close this window and try again from the app.";
 
   const returnHref = safeReturnHref(returnTo);
@@ -121,6 +138,28 @@ function popupResponse(message: string, ok: boolean, returnTo: string, accountId
   });
 }
 
+function oauthUiResponse(
+  popupFlow: boolean,
+  returnTo: string,
+  message: string,
+  ok: boolean,
+  accountId?: string,
+  connectedEmail?: string,
+) {
+  const payload: Record<string, unknown> = {
+    type: "gmail-oauth",
+    ok,
+    message: message.slice(0, 300),
+    account_id: accountId ?? null,
+    return_to: returnTo,
+  };
+  if (connectedEmail) payload.connected_email = connectedEmail;
+
+  const redirect = tryRedirectToBridge(popupFlow, returnTo, payload);
+  if (redirect) return redirect;
+  return popupResponseHtml(payload, ok, returnTo);
+}
+
 Deno.serve(async (req) => {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
@@ -128,17 +167,21 @@ Deno.serve(async (req) => {
   const errorParam = url.searchParams.get("error");
 
   let returnTo = "/";
-  try {
-    if (stateRaw) {
-      const decoded = JSON.parse(atob(stateRaw)) as { return_to?: string };
-      returnTo = typeof decoded.return_to === "string" && decoded.return_to ? decoded.return_to : "/";
-    }
-  } catch { /* ignore */ }
+  let popupFlow = false;
+  if (stateRaw) {
+    try {
+      const decoded = JSON.parse(atob(stateRaw)) as { return_to?: string; popup?: boolean };
+      if (typeof decoded.return_to === "string" && decoded.return_to) returnTo = decoded.return_to;
+      popupFlow = decoded.popup === true;
+    } catch { /* ignore */ }
+  }
 
-  // Always return HTML (never HTTP redirect). A 302 navigates whichever tab hit this URL —
-  // if that tab was the main app (lost opener / mobile), the SPA reloads and feels like "leaving the app".
-  if (errorParam) return popupResponse(`Google returned: ${errorParam}`, false, returnTo);
-  if (!code || !stateRaw) return popupResponse("Missing authorization code.", false, returnTo);
+  if (errorParam) {
+    return oauthUiResponse(popupFlow, returnTo, `Google returned: ${errorParam}`, false);
+  }
+  if (!code || !stateRaw) {
+    return oauthUiResponse(popupFlow, returnTo, "Missing authorization code.", false);
+  }
 
   try {
     const state = JSON.parse(atob(stateRaw));
@@ -171,13 +214,27 @@ Deno.serve(async (req) => {
     const expiresIn: number = tokenData.expires_in ?? 3600;
     const scope: string = tokenData.scope ?? "";
 
-    // Fetch user's email
-    const profRes = await fetch("https://www.googleapis.com/gmail/v1/users/me/profile", {
+    const userinfoRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    const profile = await profRes.json();
-    if (!profRes.ok) throw new Error(`Profile fetch failed: ${JSON.stringify(profile).slice(0, 300)}`);
-    const emailAddress: string = profile.emailAddress;
+    const userinfo = await userinfoRes.json();
+    if (!userinfoRes.ok) {
+      throw new Error(`Userinfo fetch failed: ${JSON.stringify(userinfo).slice(0, 300)}`);
+    }
+    const emailAddress = typeof userinfo.email === "string" ? userinfo.email : "";
+    if (!emailAddress) throw new Error("Google did not return an email address. Try reconnecting with full account access.");
+
+    const s = scope.toLowerCase();
+    const hasGmailScope =
+      s.includes("auth/gmail.readonly") ||
+      s.includes("auth/gmail.modify") ||
+      s.includes("auth/gmail.compose") ||
+      s.includes("auth/gmail.metadata");
+    if (!hasGmailScope) {
+      throw new Error(
+        "Google did not grant Gmail access for this app. Remove the app at myaccount.google.com/permissions and connect again, approving all Gmail permissions.",
+      );
+    }
 
     const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
@@ -220,10 +277,17 @@ Deno.serve(async (req) => {
       accountId = inserted.id;
     }
 
-    return popupResponse(`Connected ${emailAddress}. Syncing will begin shortly.`, true, returnTo, accountId);
+    return oauthUiResponse(
+      popupFlow,
+      returnTo,
+      `Connected ${emailAddress}. Syncing will begin shortly.`,
+      true,
+      accountId,
+      emailAddress,
+    );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("gmail-oauth-callback error:", msg);
-    return popupResponse(msg, false, returnTo);
+    return oauthUiResponse(popupFlow, returnTo, msg, false);
   }
 });

@@ -92,6 +92,14 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
   useEffect(() => {
     const onMessage = async (e: MessageEvent) => {
       if (e.data?.type !== "gmail-oauth") return;
+      // Callback may post from Supabase HTML or from same-origin bridge (/gmail-oauth-popup-result.html).
+      const origin = typeof e.origin === "string" ? e.origin : "";
+      const trusted =
+        origin === window.location.origin ||
+        origin.includes(".supabase.co") ||
+        origin.includes("127.0.0.1") ||
+        origin.includes("localhost");
+      if (!trusted) return;
       if (popupWatchRef.current) {
         window.clearInterval(popupWatchRef.current);
         popupWatchRef.current = null;
@@ -111,7 +119,10 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
 
       const accountId: string | null = e.data?.account_id ?? null;
       const msg = String(e.data?.message ?? "");
-      const connectedEmail = parseConnectedEmailFromOAuthMessage(msg);
+      const fromPayload =
+        typeof e.data?.connected_email === "string" ? e.data.connected_email.trim() : "";
+      const connectedEmail =
+        fromPayload || parseConnectedEmailFromOAuthMessage(msg);
 
       await onAccountAdded();
 

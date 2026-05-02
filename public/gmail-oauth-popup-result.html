@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gmail</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      color: #525252;
+      background: #fafafa;
+    }
+  </style>
+</head>
+<body>
+  <p id="status">Finishing...</p>
+  <script>
+    (function () {
+      var el = document.getElementById("status");
+      try {
+        var raw = (location.hash && location.hash.length > 1) ? location.hash.slice(1) : "";
+        if (!raw) {
+          if (el) el.textContent = "Missing result. You can close this window.";
+          return;
+        }
+        var payload = JSON.parse(decodeURIComponent(raw));
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(payload, "*");
+          try { window.opener.focus(); } catch (e) {}
+          if (el) el.textContent = "Closing...";
+        } else {
+          if (el) el.textContent = "You can close this window and return to the app.";
+        }
+      } catch (err) {
+        if (el) el.textContent = "Something went wrong. Close this window and try again.";
+      }
+      setTimeout(function () {
+        try { window.close(); } catch (e) {}
+      }, 350);
+    })();
+  </script>
+</body>
+</html>
