@@ -1,36 +1,33 @@
-import { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Sidebar } from "@/components/inbox/Sidebar";
-import { ThreadList, ThreadRow } from "@/components/inbox/ThreadList";
+import { ThreadList } from "@/components/inbox/ThreadList";
 import { ThreadView } from "@/components/inbox/ThreadView";
 import { AddAccountDialog } from "@/components/inbox/AddAccountDialog";
 import { ComposeDialog } from "@/components/inbox/ComposeDialog";
-import { toast } from "sonner";
 import { LandingHero } from "@/components/LandingHero";
+import { fetchEmailAccounts, fetchEnrichedThreads, type EmailAccountRow } from "@/lib/inbox-data";
+import { formatGmailLabelId } from "@/lib/gmail-labels";
+import { useForegroundMailboxSync } from "@/hooks/useForegroundMailboxSync";
+import { useAppUnreadBadge } from "@/hooks/useAppUnreadBadge";
 
-interface Account {
-  id: string;
-  email_address: string;
-  display_name: string | null;
-  color: string;
-  sync_status: string;
-  provider_type: string;
-}
+type Account = EmailAccountRow;
 
-type MailboxView = "inbox" | "starred" | "sent" | "archive" | "trash";
+type MailboxView = "inbox" | "drafts" | "starred" | "sent" | "archive" | "trash";
 
 const Index = () => {
   const { session, user, loading: authLoading } = useAuth();
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [threads, setThreads] = useState<ThreadRow[]>([]);
+  const queryClient = useQueryClient();
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
   const [filterUnread, setFilterUnread] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
+  const [composeDraftThreadId, setComposeDraftThreadId] = useState<string | null>(null);
   const [mailboxView, setMailboxView] = useState<MailboxView>("inbox");
+  const [gmailLabelFilter, setGmailLabelFilter] = useState<string | null>(null);
 
   useEffect(() => {
     document.title = "Unified Inbox Hub — Unified email dashboard";
@@ -47,90 +44,31 @@ const Index = () => {
     }
   }, [user?.id]);
 
-  const accountsById = useMemo(() => Object.fromEntries(accounts.map(a => [a.id, a])), [accounts]);
+  useEffect(() => {
+    setGmailLabelFilter(null);
+  }, [selectedAccountId, mailboxView]);
 
-  const loadAccounts = async () => {
-    if (!user) return;
-    const { data } = await supabase
-      .from("email_accounts")
-      .select("*")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: true });
-    setAccounts((data ?? []) as Account[]);
-  };
+  const { data: accounts = [] } = useQuery({
+    queryKey: ["email-accounts", user?.id],
+    queryFn: () => fetchEmailAccounts(user!.id),
+    enabled: !!user?.id,
+    staleTime: 60_000,
+  });
 
-  const loadThreads = useCallback(async (opts?: { silent?: boolean }) => {
-    if (!user) return;
-    if (!opts?.silent) setLoading(true);
-    const pageSize = 1000;
-    let from = 0;
-    let keepLoading = true;
-    const allThreads: any[] = [];
-    let error: { message: string } | null = null;
+  const accountsById = useMemo(() => Object.fromEntries(accounts.map((a) => [a.id, a])), [accounts]);
+  const accountIdsKey = useMemo(() => [...accounts.map((a) => a.id)].sort().join(","), [accounts]);
 
-    while (keepLoading) {
-      const { data: batch, error: batchError } = await supabase
-        .from("email_threads")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("last_message_at", { ascending: false })
-        .range(from, from + pageSize - 1);
-
-      if (batchError) {
-        error = batchError;
-        break;
-      }
-
-      allThreads.push(...(batch ?? []));
-      if (!batch || batch.length < pageSize) {
-        keepLoading = false;
-      } else {
-        from += pageSize;
-      }
-    }
-
-    if (error) {
-      toast.error(error.message);
-      if (!opts?.silent) setLoading(false);
-      return;
-    }
-
-    // Get latest sender for each thread
-    const threadIds = allThreads.map(t => t.id);
-    const { data: latestEmails } = await supabase
-      .from("emails")
-      .select("thread_id, sender, sender_name, sent_at, direction, is_starred")
-      .in("thread_id", threadIds.length ? threadIds : ["00000000-0000-0000-0000-000000000000"])
-      .order("sent_at", { ascending: false });
-
-    const latestByThread: Record<string, { sender: string; sender_name: string | null }> = {};
-    const starredThreadIds = new Set<string>();
-    const sentThreadIds = new Set<string>();
-    for (const e of latestEmails ?? []) {
-      if (e.direction === "inbound" && !latestByThread[e.thread_id!]) {
-        latestByThread[e.thread_id!] = { sender: e.sender, sender_name: e.sender_name };
-      }
-      if (e.is_starred) starredThreadIds.add(e.thread_id!);
-      if (e.direction === "outbound") sentThreadIds.add(e.thread_id!);
-    }
-
-    const enriched: ThreadRow[] = allThreads.map(t => ({
-      ...t,
-      account: accountsById[t.account_id]
-        ? { email_address: accountsById[t.account_id].email_address, color: accountsById[t.account_id].color }
-        : null,
-      latest_sender: latestByThread[t.id]?.sender ?? null,
-      latest_sender_name: latestByThread[t.id]?.sender_name ?? null,
-      has_starred: starredThreadIds.has(t.id),
-      has_outbound: sentThreadIds.has(t.id),
-    }));
-
-    setThreads(enriched);
-    if (!opts?.silent) setLoading(false);
-  }, [user, accountsById]);
-
-  const loadThreadsRef = useRef(loadThreads);
-  loadThreadsRef.current = loadThreads;
+  const {
+    data: threads = [],
+    isLoading: loading,
+    refetch: refetchThreads,
+  } = useQuery({
+    queryKey: ["inbox-threads", user?.id, accountIdsKey],
+    queryFn: () => fetchEnrichedThreads(user!.id, accountsById),
+    enabled: !!user?.id,
+    staleTime: 8_000,
+    refetchOnWindowFocus: true,
+  });
 
   useEffect(() => {
     if (!user?.id) return;
@@ -138,8 +76,8 @@ const Index = () => {
     const schedule = () => {
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
-        loadThreadsRef.current({ silent: true });
-      }, 400);
+        void queryClient.invalidateQueries({ queryKey: ["inbox-threads", user.id] });
+      }, 100);
     };
 
     const channel = supabase
@@ -160,35 +98,55 @@ const Index = () => {
       if (debounce) clearTimeout(debounce);
       supabase.removeChannel(channel);
     };
-  }, [user?.id]);
+  }, [user?.id, queryClient]);
 
-  // Initial load from live database
-  useEffect(() => {
-    if (!user) return;
-    (async () => {
-      await loadAccounts();
-    })();
-  }, [user?.id]);
+  const invalidateInbox = () => {
+    void queryClient.invalidateQueries({ queryKey: ["inbox-threads", user?.id] });
+  };
 
-  // Reload threads when accounts change
-  useEffect(() => {
-    if (accounts.length === 0 && user) {
-      loadThreads();
-    } else if (accounts.length > 0) {
-      loadThreads();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accounts]);
+  const hasGmailContext = useMemo(
+    () =>
+      selectedAccountId
+        ? accountsById[selectedAccountId]?.provider_type === "gmail"
+        : accounts.some((a) => a.provider_type === "gmail"),
+    [selectedAccountId, accounts, accountsById],
+  );
 
-  const filteredThreads = useMemo(() => {
-    let list = selectedAccountId ? threads.filter(t => t.account_id === selectedAccountId) : threads;
+  const threadsForLabelOptions = useMemo(() => {
+    let list = selectedAccountId ? threads.filter((t) => t.account_id === selectedAccountId) : threads;
     if (mailboxView === "starred") list = list.filter((t) => t.has_starred);
     if (mailboxView === "sent") list = list.filter((t) => t.has_outbound);
     if (mailboxView === "archive") list = list.filter((t) => t.folder === "archive");
     if (mailboxView === "trash") list = list.filter((t) => t.folder === "trash");
+    if (mailboxView === "drafts") list = list.filter((t) => t.folder === "drafts");
     if (mailboxView === "inbox") list = list.filter((t) => t.folder === "inbox");
     return list;
   }, [threads, selectedAccountId, mailboxView]);
+
+  const gmailLabelOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of threadsForLabelOptions) {
+      if (accountsById[t.account_id]?.provider_type !== "gmail") continue;
+      for (const id of t.gmail_label_ids ?? []) set.add(id);
+    }
+    return [...set].sort().map((id) => ({ id, label: formatGmailLabelId(id) }));
+  }, [threadsForLabelOptions, accountsById]);
+
+  const showGmailLabelFilter = hasGmailContext && mailboxView !== "drafts" && gmailLabelOptions.length > 0;
+
+  const filteredThreads = useMemo(() => {
+    let list = selectedAccountId ? threads.filter((t) => t.account_id === selectedAccountId) : threads;
+    if (mailboxView === "starred") list = list.filter((t) => t.has_starred);
+    if (mailboxView === "sent") list = list.filter((t) => t.has_outbound);
+    if (mailboxView === "archive") list = list.filter((t) => t.folder === "archive");
+    if (mailboxView === "trash") list = list.filter((t) => t.folder === "trash");
+    if (mailboxView === "drafts") list = list.filter((t) => t.folder === "drafts");
+    if (mailboxView === "inbox") list = list.filter((t) => t.folder === "inbox");
+    if (gmailLabelFilter) {
+      list = list.filter((t) => (t.gmail_label_ids ?? []).includes(gmailLabelFilter));
+    }
+    return list;
+  }, [threads, selectedAccountId, mailboxView, gmailLabelFilter]);
 
   const unreadByAccount = useMemo(() => {
     const map: Record<string, number> = {};
@@ -200,10 +158,13 @@ const Index = () => {
 
   const totalUnread = useMemo(
     () => threads.reduce((sum, t) => sum + (t.unread_count > 0 ? 1 : 0), 0),
-    [threads]
+    [threads],
   );
 
-  const selectedThread = threads.find(t => t.id === selectedThreadId);
+  useForegroundMailboxSync(user?.id, accounts, accountIdsKey);
+  useAppUnreadBadge(totalUnread);
+
+  const selectedThread = threads.find((t) => t.id === selectedThreadId);
   const selectedAccount = selectedThread ? accountsById[selectedThread.account_id] ?? null : null;
 
   const title = selectedAccountId
@@ -216,32 +177,45 @@ const Index = () => {
           ? "Archive"
           : mailboxView === "trash"
             ? "Trash"
-            : "All inboxes";
+            : mailboxView === "drafts"
+              ? "Drafts"
+              : "All inboxes";
 
   if (authLoading) return <div className="min-h-screen grid place-items-center text-sm text-muted-foreground">Loading…</div>;
-  if (!session) return <LandingHero />;
+  if (!session) {
+    return (
+      <div className="flex h-full min-h-0 flex-1 flex-col overflow-y-auto">
+        <LandingHero />
+      </div>
+    );
+  }
 
-  // Mobile pane navigation: sidebar -> list -> thread
-  const mobileView: "sidebar" | "list" | "thread" =
-    selectedThreadId ? "thread" : "list";
+  const mobileView: "sidebar" | "list" | "thread" = selectedThreadId ? "thread" : "list";
 
   return (
-    <div className="h-[100dvh] flex bg-background overflow-hidden">
-      {/* Sidebar: drawer on mobile, fixed on md+ */}
+    <div className="flex min-h-0 flex-1 bg-background overflow-hidden">
       <Sidebar
         selectedAccountId={selectedAccountId}
-        onSelectAccount={(id) => { setSelectedAccountId(id); setSelectedThreadId(null); }}
-        onCompose={() => setComposeOpen(true)}
+        onSelectAccount={(id) => {
+          setSelectedAccountId(id);
+          setSelectedThreadId(null);
+        }}
+        onCompose={() => {
+          setComposeDraftThreadId(null);
+          setComposeOpen(true);
+        }}
         activeNav={mailboxView}
         onChangeNav={setMailboxView}
         onAddAccount={() => setAddOpen(true)}
         accounts={accounts}
         unreadByAccount={unreadByAccount}
         totalUnread={totalUnread}
-        onRefresh={async () => { await loadAccounts(); await loadThreads(); }}
+        onRefresh={async () => {
+          await queryClient.invalidateQueries({ queryKey: ["email-accounts", user?.id] });
+          await queryClient.invalidateQueries({ queryKey: ["inbox-threads", user?.id] });
+        }}
       />
 
-      {/* Thread list: hidden on mobile when a thread is open */}
       <div
         className={
           "flex-1 md:flex-initial md:w-[380px] lg:w-[420px] md:shrink-0 min-w-0 " +
@@ -251,38 +225,76 @@ const Index = () => {
         <ThreadList
           threads={filteredThreads}
           selectedThreadId={selectedThreadId}
-          onSelectThread={setSelectedThreadId}
+          onSelectThread={(id) => {
+            const row = filteredThreads.find((x) => x.id === id);
+            if (row?.folder === "drafts") {
+              void (async () => {
+                const { data: t } = await supabase.from("email_threads").select("draft_content").eq("id", id).single();
+                const c = t?.draft_content as Record<string, unknown> | null;
+                const kind = c?.kind as string | undefined;
+                const ctx = c?.context_thread_id;
+                if ((kind === "reply" || kind === "forward") && typeof ctx === "string") {
+                  try {
+                    sessionStorage.setItem("inbox-reply-draft", JSON.stringify({ ...c, threadDraftId: id }));
+                  } catch {
+                    /* ignore */
+                  }
+                  setSelectedThreadId(ctx);
+                  setMailboxView("inbox");
+                  return;
+                }
+                setComposeDraftThreadId(id);
+                setComposeOpen(true);
+              })();
+              return;
+            }
+            setSelectedThreadId(id);
+          }}
           loading={loading}
-          onRefresh={loadThreads}
+          onRefresh={() => void refetchThreads()}
           filterUnread={filterUnread}
-          onToggleUnread={() => setFilterUnread(v => !v)}
+          onToggleUnread={() => setFilterUnread((v) => !v)}
           title={title}
+          showGmailLabelFilter={showGmailLabelFilter}
+          gmailLabelFilter={gmailLabelFilter}
+          onGmailLabelFilter={setGmailLabelFilter}
+          gmailLabelOptions={gmailLabelOptions}
         />
       </div>
 
-      {/* Thread view: full-width on mobile when open, else right pane on md+ */}
-      <div
-        className={
-          "flex-1 min-w-0 " +
-          (mobileView === "thread" ? "flex" : "hidden md:flex")
-        }
-      >
+      <div className={"flex-1 min-w-0 " + (mobileView === "thread" ? "flex" : "hidden md:flex")}>
         <ThreadView
           threadId={selectedThreadId}
           thread={selectedThread ?? null}
-          account={selectedAccount as any}
-          onAfterAction={loadThreads}
+          account={selectedAccount as Account | null}
+          onAfterAction={invalidateInbox}
           onBack={() => setSelectedThreadId(null)}
         />
       </div>
 
-      <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onAccountAdded={async () => { await loadAccounts(); await loadThreads(); }} />
+      <AddAccountDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        onAccountAdded={async () => {
+          await queryClient.invalidateQueries({ queryKey: ["email-accounts", user?.id] });
+          await queryClient.invalidateQueries({ queryKey: ["inbox-threads", user?.id] });
+        }}
+      />
       <ComposeDialog
         open={composeOpen}
-        onOpenChange={setComposeOpen}
+        onOpenChange={(open) => {
+          setComposeOpen(open);
+          if (!open) setComposeDraftThreadId(null);
+        }}
         accounts={accounts}
+        draftThreadId={composeDraftThreadId}
+        onDraftCreated={(id) => setComposeDraftThreadId(id)}
+        onDraftSaved={async () => {
+          await queryClient.invalidateQueries({ queryKey: ["inbox-threads", user?.id] });
+        }}
         onSent={async () => {
-          await loadThreads();
+          setComposeDraftThreadId(null);
+          await queryClient.invalidateQueries({ queryKey: ["inbox-threads", user?.id] });
         }}
       />
     </div>

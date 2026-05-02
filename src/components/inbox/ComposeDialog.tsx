@@ -4,12 +4,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Loader2, Paperclip, Send, X } from "lucide-react";
+import { Loader2, Paperclip, Save, Send, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
 import { ComposeRichEditor } from "./ComposeRichEditor.tsx";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { Progress } from "@/components/ui/progress";
+import { htmlToText } from "@/lib/email-html";
+import { uploadOutboundAttachment, type OutboundAttachment } from "@/lib/mail-attachments";
+import { enqueueOutboxSend, shouldQueueSendFailure } from "@/lib/outbox-queue";
 
 interface Account {
   id: string;
@@ -23,11 +27,15 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   accounts: Account[];
   onSent: () => Promise<void> | void;
+  /** When set, loads and updates this draft thread */
+  draftThreadId?: string | null;
+  onDraftSaved?: () => void | Promise<void>;
+  onDraftCreated?: (threadId: string) => void;
 }
 
 type RecipientFieldKey = "to" | "cc" | "bcc";
 
-export function ComposeDialog({ open, onOpenChange, accounts, onSent }: Props) {
+export function ComposeDialog({ open, onOpenChange, accounts, onSent, draftThreadId, onDraftSaved, onDraftCreated }: Props) {
   const isMobile = useIsMobile();
   const { user } = useAuth();
   const [sending, setSending] = useState(false);
@@ -46,13 +54,10 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent }: Props) {
   const [subject, setSubject] = useState("");
   const [bodyHtml, setBodyHtml] = useState("");
   const [bodyEditorKey, setBodyEditorKey] = useState(0);
-  const [attachments, setAttachments] = useState<Array<{
-    filename: string;
-    mime_type: string;
-    size: number;
-    data_base64: string;
-  }>>([]);
+  const [attachments, setAttachments] = useState<OutboundAttachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  const [attachProgress, setAttachProgress] = useState<{ done: number; total: number } | null>(null);
+  const [savingDraft, setSavingDraft] = useState(false);
   const suggestionsReqRef = useRef(0);
 
   const selectedAccount = useMemo(
@@ -76,11 +81,6 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent }: Props) {
     setBodyEditorKey((k) => k + 1);
     setAttachments([]);
     setAccountId(accounts[0]?.id ?? "");
-  };
-
-  const htmlToText = (html: string) => {
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    return (doc.body.textContent ?? "").trim();
   };
 
   const normalizeEmail = (raw: string) => {
@@ -208,6 +208,17 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent }: Props) {
         }
       }
 
+      if (user?.id) {
+        const { data: bookRows } = await supabase.from("contacts").select("email").eq("user_id", user.id).limit(120);
+        const term = search.toLowerCase();
+        for (const contactRow of bookRows ?? []) {
+          const email = normalizeEmail(String(contactRow.email ?? ""));
+          if (!email) continue;
+          if (term && !email.includes(term)) continue;
+          if (!ranked.has(email)) ranked.set(email, { count: 999, lastSentAt: new Date().toISOString() });
+        }
+      }
+
       const suggestions = [...ranked.entries()]
         .sort((a, b) => {
           const aStarts = search && a[0].startsWith(search) ? 1 : 0;
@@ -229,39 +240,121 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent }: Props) {
       window.clearTimeout(timeout);
       setLoadingSuggestions(false);
     };
-  }, [open, accountId, toInput, ccInput, bccInput, activeRecipientField]);
+  }, [open, accountId, toInput, ccInput, bccInput, activeRecipientField, user?.id]);
+
+  useEffect(() => {
+    if (!open || !draftThreadId || !user?.id) return;
+    let cancelled = false;
+    void (async () => {
+      const { data: row, error } = await supabase
+        .from("email_threads")
+        .select("*")
+        .eq("id", draftThreadId)
+        .eq("user_id", user.id)
+        .single();
+      if (cancelled || error || !row?.draft_content) return;
+      const d = row.draft_content as Record<string, unknown>;
+      setAccountId(row.account_id);
+      setToRecipients(Array.isArray(d.to) ? (d.to as string[]) : []);
+      setCcRecipients(Array.isArray(d.cc) ? (d.cc as string[]) : []);
+      setBccRecipients(Array.isArray(d.bcc) ? (d.bcc as string[]) : []);
+      setSubject(typeof d.subject === "string" ? d.subject : row.subject ?? "");
+      setBodyHtml(typeof d.body_html === "string" ? d.body_html : "");
+      setBodyEditorKey((k) => k + 1);
+      setAttachments(Array.isArray(d.attachments) ? (d.attachments as OutboundAttachment[]) : []);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, draftThreadId, user?.id]);
 
   const pickFiles = async (files: FileList | null) => {
     if (!files?.length) return;
-    const next: Array<{
-      filename: string;
-      mime_type: string;
-      size: number;
-      data_base64: string;
-    }> = [];
-    for (const file of Array.from(files)) {
+    const list = Array.from(files).filter((file) => {
       if (file.size > 10 * 1024 * 1024) {
         toast.error(`${file.name} is larger than 10MB.`);
-        continue;
+        return false;
       }
-      const b64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const result = String(reader.result ?? "");
-          const idx = result.indexOf(",");
-          resolve(idx >= 0 ? result.slice(idx + 1) : "");
-        };
-        reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
-        reader.readAsDataURL(file);
-      });
-      next.push({
-        filename: file.name,
-        mime_type: file.type || "application/octet-stream",
-        size: file.size,
-        data_base64: b64,
-      });
+      return true;
+    });
+    if (!list.length) return;
+    setAttachProgress({ done: 0, total: list.length });
+    const next: OutboundAttachment[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const file = list[i]!;
+      try {
+        if (!user?.id) throw new Error("Not signed in");
+        const uploaded = await uploadOutboundAttachment(supabase, user.id, file);
+        next.push(uploaded);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Failed to attach file");
+      }
+      setAttachProgress({ done: i + 1, total: list.length });
     }
+    setAttachProgress(null);
     setAttachments((prev) => [...prev, ...next].slice(0, 10));
+  };
+
+  const saveDraft = async () => {
+    if (!user || !selectedAccount) {
+      toast.error("Select a sender account.");
+      return;
+    }
+    setSavingDraft(true);
+    try {
+      const bodyText = htmlToText(bodyHtml);
+      const payload = {
+        version: 1,
+        kind: "compose" as const,
+        to: toRecipients,
+        cc: ccRecipients,
+        bcc: bccRecipients,
+        subject: subject.trim(),
+        body_html: bodyHtml,
+        attachments,
+      };
+      const participants = Array.from(new Set([selectedAccount.email_address, ...toRecipients, ...ccRecipients, ...bccRecipients]));
+      if (draftThreadId) {
+        const { error } = await supabase
+          .from("email_threads")
+          .update({
+            subject: subject.trim() || "(no subject)",
+            snippet: (bodyText || "(draft)").slice(0, 140),
+            last_message_at: new Date().toISOString(),
+            participants,
+            draft_content: payload,
+          })
+          .eq("id", draftThreadId)
+          .eq("user_id", user.id);
+        if (error) throw new Error(error.message);
+      } else {
+        const { data: created, error } = await supabase
+          .from("email_threads")
+          .insert({
+            user_id: user.id,
+            account_id: selectedAccount.id,
+            folder: "drafts",
+            subject: subject.trim() || "(no subject)",
+            participants,
+            last_message_at: new Date().toISOString(),
+            message_count: 0,
+            unread_count: 0,
+            snippet: (bodyText || "(draft)").slice(0, 140),
+            draft_content: payload,
+          })
+          .select("id")
+          .single();
+        if (error) throw new Error(error.message);
+        if (created?.id) onDraftCreated?.(created.id);
+      }
+      toast.success("Draft saved");
+      await onDraftSaved?.();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(msg);
+    } finally {
+      setSavingDraft(false);
+    }
   };
 
   const handleOpenChange = (next: boolean) => {
@@ -294,40 +387,86 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent }: Props) {
     try {
       const sentAt = new Date().toISOString();
       const allRecipients = Array.from(new Set([...toRecipients, ...ccRecipients, ...bccRecipients]));
-      const { data: thread, error: threadError } = await supabase
-        .from("email_threads")
-        .insert({
-          user_id: user.id,
-          account_id: selectedAccount.id,
-          subject: subject.trim() || "(no subject)",
-          participants: [selectedAccount.email_address, ...allRecipients],
-          last_message_at: sentAt,
-          message_count: 1,
-          unread_count: 0,
-          snippet: bodyText.slice(0, 140),
-        })
-        .select("id")
-        .single();
-      if (threadError || !thread?.id) {
-        throw new Error(threadError?.message ?? "Failed to create thread");
+      let threadId: string;
+      if (draftThreadId) {
+        const { error: upErr } = await supabase
+          .from("email_threads")
+          .update({
+            subject: subject.trim() || "(no subject)",
+            snippet: bodyText.slice(0, 140),
+            folder: "inbox",
+            draft_content: null,
+            last_message_at: sentAt,
+            participants: [selectedAccount.email_address, ...allRecipients],
+          })
+          .eq("id", draftThreadId)
+          .eq("user_id", user.id);
+        if (upErr) throw new Error(upErr.message);
+        threadId = draftThreadId;
+      } else {
+        const { data: thread, error: threadError } = await supabase
+          .from("email_threads")
+          .insert({
+            user_id: user.id,
+            account_id: selectedAccount.id,
+            folder: "inbox",
+            subject: subject.trim() || "(no subject)",
+            participants: [selectedAccount.email_address, ...allRecipients],
+            last_message_at: sentAt,
+            message_count: 1,
+            unread_count: 0,
+            snippet: bodyText.slice(0, 140),
+          })
+          .select("id")
+          .single();
+        if (threadError || !thread?.id) {
+          throw new Error(threadError?.message ?? "Failed to create thread");
+        }
+        threadId = thread.id;
       }
 
       const fnName = selectedAccount.provider_type === "gmail" ? "gmail-send" : "smtp-send";
-      const { data, error } = await supabase.functions.invoke(fnName, {
-        body: {
-          account_id: selectedAccount.id,
-          thread_id: thread.id,
-          to: toRecipients.join(", "),
-          cc: ccRecipients,
-          bcc: bccRecipients,
-          subject: subject.trim() || "(no subject)",
-          body_text: bodyText,
-          html_body: bodyHtml,
-          attachments,
-        },
-      });
-      if (error || !data?.ok) {
-        throw new Error(error?.message ?? data?.error ?? "Failed to send");
+      const invokeBody = {
+        account_id: selectedAccount.id,
+        thread_id: threadId,
+        to: toRecipients.join(", "),
+        cc: ccRecipients,
+        bcc: bccRecipients,
+        subject: subject.trim() || "(no subject)",
+        body_text: bodyText,
+        html_body: bodyHtml,
+        attachments,
+      };
+
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        enqueueOutboxSend({ fnName, body: invokeBody });
+        toast.info("You are offline — message queued. It will send when you reconnect.");
+        await onSent();
+        onOpenChange(false);
+        resetForm();
+        return;
+      }
+
+      const { data, error } = await supabase.functions.invoke(fnName, { body: invokeBody });
+      const res = data as { ok?: boolean; error?: string; code?: string } | null;
+
+      if (error || !res?.ok) {
+        const errObj = error ?? new Error(res?.error ?? "Failed to send");
+        if (shouldQueueSendFailure({ error: errObj, responseCode: res?.code })) {
+          enqueueOutboxSend({ fnName, body: invokeBody });
+          toast.info("Could not reach the server — message queued to send later.");
+          await onSent();
+          onOpenChange(false);
+          resetForm();
+          return;
+        }
+        const code = res?.code;
+        if (code === "RECONNECT_GMAIL") {
+          toast.error("Gmail authorization expired. Reconnect your Gmail account in Accounts → settings.");
+        } else if (code === "CHECK_SMTP") {
+          toast.error("SMTP send failed. Check SMTP host, port, and credentials in account settings.");
+        }
+        throw new Error(res?.error ?? error?.message ?? "Failed to send");
       }
 
       toast.success(`Sent from ${selectedAccount.email_address}`);
@@ -559,6 +698,14 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent }: Props) {
           </div>
           <div className="space-y-2">
             <Label>Attachments</Label>
+            {attachProgress && (
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">
+                  Attaching file {attachProgress.done} of {attachProgress.total}…
+                </p>
+                <Progress value={(attachProgress.done / attachProgress.total) * 100} className="h-2" />
+              </div>
+            )}
             <div
               className={`rounded-lg border border-dashed p-3 md:p-4 transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border bg-muted/20"}`}
               onDragOver={(e) => {
@@ -612,11 +759,15 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent }: Props) {
           </div>
         </div>
 
-        <div className="border-t border-border px-4 md:px-6 py-3 flex items-center justify-end gap-2 bg-background">
-          <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={sending}>
+        <div className="border-t border-border px-4 md:px-6 py-3 flex flex-wrap items-center justify-end gap-2 bg-background">
+          <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={sending || savingDraft}>
             Cancel
           </Button>
-          <Button onClick={send} disabled={sending || accounts.length === 0 || !accountId}>
+          <Button variant="secondary" onClick={() => void saveDraft()} disabled={sending || savingDraft || accounts.length === 0 || !accountId}>
+            {savingDraft ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+            {savingDraft ? "Saving…" : "Save draft"}
+          </Button>
+          <Button onClick={send} disabled={sending || savingDraft || accounts.length === 0 || !accountId}>
             {sending ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
             {sending ? "Sending..." : "Send"}
           </Button>

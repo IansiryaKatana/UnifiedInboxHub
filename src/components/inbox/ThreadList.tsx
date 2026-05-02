@@ -1,10 +1,12 @@
 import { formatDistanceToNowStrict } from "date-fns";
 import { AccountBadge } from "./AccountBadge";
 import { cn } from "@/lib/utils";
-import { Search, Filter, RefreshCw } from "lucide-react";
+import { Search, Mail, RefreshCw } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useState, useMemo, useEffect } from "react";
+import { supabase } from "@/integrations/supabase/client";
 
 export interface ThreadRow {
   id: string;
@@ -20,6 +22,9 @@ export interface ThreadRow {
   latest_sender?: string | null;
   has_starred?: boolean;
   has_outbound?: boolean;
+  folder?: string;
+  /** Gmail API label ids (Gmail-linked threads only). */
+  gmail_label_ids?: string[];
 }
 
 interface Props {
@@ -31,28 +36,108 @@ interface Props {
   filterUnread: boolean;
   onToggleUnread: () => void;
   title: string;
+  /** Gmail label filter (optional). */
+  showGmailLabelFilter?: boolean;
+  gmailLabelFilter?: string | null;
+  onGmailLabelFilter?: (labelId: string | null) => void;
+  gmailLabelOptions?: { id: string; label: string }[];
 }
 
-export function ThreadList({ threads, selectedThreadId, onSelectThread, loading, onRefresh, filterUnread, onToggleUnread, title }: Props) {
+export function ThreadList({
+  threads,
+  selectedThreadId,
+  onSelectThread,
+  loading,
+  onRefresh,
+  filterUnread,
+  onToggleUnread,
+  title,
+  showGmailLabelFilter,
+  gmailLabelFilter,
+  onGmailLabelFilter,
+  gmailLabelOptions = [],
+}: Props) {
   const [query, setQuery] = useState("");
+  const [searchThreadIds, setSearchThreadIds] = useState<string[] | null>(null);
   const [page, setPage] = useState(1);
   const pageSize = 100;
   const titleLabel = title ? title[0].toUpperCase() + title.slice(1) : title;
 
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) {
+      setSearchThreadIds(null);
+      return;
+    }
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      void (async () => {
+        if (cancelled) return;
+        const allow = new Set<string>();
+        const emFts = await supabase
+          .from("emails")
+          .select("thread_id")
+          .textSearch("search_tsv", q, { type: "websearch", config: "simple" })
+          .limit(500);
+        const thFts = await supabase
+          .from("email_threads")
+          .select("id")
+          .textSearch("search_tsv", q, { type: "websearch", config: "simple" })
+          .limit(300);
+        if (!emFts.error && !thFts.error) {
+          for (const r of emFts.data ?? []) if (r.thread_id) allow.add(r.thread_id);
+          for (const r of thFts.data ?? []) allow.add(r.id);
+          setSearchThreadIds([...allow]);
+          return;
+        }
+        const esc = q.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+        const pat = `%${esc}%`;
+        const [emSubj, emSnip, emBody, thSubj, thSnip] = await Promise.all([
+          supabase.from("emails").select("thread_id").ilike("subject", pat).limit(250),
+          supabase.from("emails").select("thread_id").ilike("snippet", pat).limit(250),
+          supabase.from("emails").select("thread_id").ilike("body_text", pat).limit(250),
+          supabase.from("email_threads").select("id").ilike("subject", pat).limit(200),
+          supabase.from("email_threads").select("id").ilike("snippet", pat).limit(200),
+        ]);
+        if (cancelled) return;
+        const errs = [emSubj.error, emSnip.error, emBody.error, thSubj.error, thSnip.error].filter(Boolean);
+        if (errs.length > 0) {
+          setSearchThreadIds(null);
+          return;
+        }
+        allow.clear();
+        for (const r of emSubj.data ?? []) if (r.thread_id) allow.add(r.thread_id);
+        for (const r of emSnip.data ?? []) if (r.thread_id) allow.add(r.thread_id);
+        for (const r of emBody.data ?? []) if (r.thread_id) allow.add(r.thread_id);
+        for (const r of thSubj.data ?? []) allow.add(r.id);
+        for (const r of thSnip.data ?? []) allow.add(r.id);
+        setSearchThreadIds([...allow]);
+      })();
+    }, 280);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [query]);
+
   const filtered = useMemo(() => {
     let list = threads;
     if (filterUnread) list = list.filter(t => t.unread_count > 0);
-    if (query.trim()) {
-      const q = query.toLowerCase();
+    const q = query.trim();
+    if (q.length >= 2 && searchThreadIds !== null) {
+      const allow = new Set(searchThreadIds);
+      list = list.filter(t => allow.has(t.id));
+    } else if (q.length > 0) {
+      const ql = q.toLowerCase();
       list = list.filter(t =>
-        (t.subject ?? "").toLowerCase().includes(q) ||
-        (t.snippet ?? "").toLowerCase().includes(q) ||
-        (t.latest_sender_name ?? "").toLowerCase().includes(q) ||
-        (t.latest_sender ?? "").toLowerCase().includes(q)
+        (t.subject ?? "").toLowerCase().includes(ql) ||
+        (t.snippet ?? "").toLowerCase().includes(ql) ||
+        (t.latest_sender_name ?? "").toLowerCase().includes(ql) ||
+        (t.latest_sender ?? "").toLowerCase().includes(ql)
       );
     }
     return list;
-  }, [threads, filterUnread, query]);
+  }, [threads, filterUnread, query, searchThreadIds]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const paged = useMemo(
@@ -75,12 +160,13 @@ export function ThreadList({ threads, selectedThreadId, onSelectThread, loading,
             </Button>
             <Button
               variant={filterUnread ? "default" : "ghost"}
-              size="sm"
+              size="icon"
               onClick={onToggleUnread}
-              className="h-8"
+              className="h-8 w-8 shrink-0"
+              aria-label={filterUnread ? "Show all messages" : "Show unread only"}
+              title={filterUnread ? "Show all" : "Unread only"}
             >
-              <Filter className="size-3.5 mr-1.5" />
-              Unread
+              <Mail className="size-4" />
             </Button>
           </div>
         </div>
@@ -93,6 +179,27 @@ export function ThreadList({ threads, selectedThreadId, onSelectThread, loading,
             className="pl-9 h-9 bg-muted/50 border-transparent focus-visible:bg-background"
           />
         </div>
+        {showGmailLabelFilter && gmailLabelOptions.length > 0 && onGmailLabelFilter && (
+          <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between">
+            <span className="text-xs text-muted-foreground shrink-0">Gmail label</span>
+            <Select
+              value={gmailLabelFilter ?? "__all__"}
+              onValueChange={(v) => onGmailLabelFilter(v === "__all__" ? null : v)}
+            >
+              <SelectTrigger className="h-9 w-full sm:w-[200px] bg-muted/50 border-transparent">
+                <SelectValue placeholder="All labels" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All labels</SelectItem>
+                {gmailLabelOptions.map((o) => (
+                  <SelectItem key={o.id} value={o.id}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto scrollbar-thin">

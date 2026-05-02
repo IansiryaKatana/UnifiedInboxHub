@@ -1,6 +1,9 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
-import { Inbox, Send, Star, Archive, Trash2, Plus, LogOut, Menu, Settings, Bell } from "lucide-react";
+import { Inbox, Send, Star, Archive, Trash2, FileEdit, Plus, LogOut, Menu, Settings, Bell, AlertCircle, BookUser } from "lucide-react";
+import { useOutboxCount } from "@/hooks/useOutboxCount";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
@@ -37,14 +40,15 @@ interface Account {
   smtp_port?: number | null;
   smtp_username?: string | null;
   smtp_use_tls?: boolean | null;
+  last_sync_error?: string | null;
 }
 
 interface Props {
   selectedAccountId: string | null;
   onSelectAccount: (id: string | null) => void;
   onCompose: () => void;
-  activeNav: "inbox" | "starred" | "sent" | "archive" | "trash";
-  onChangeNav: (nav: "inbox" | "starred" | "sent" | "archive" | "trash") => void;
+  activeNav: "inbox" | "drafts" | "starred" | "sent" | "archive" | "trash";
+  onChangeNav: (nav: "inbox" | "drafts" | "starred" | "sent" | "archive" | "trash") => void;
   onAddAccount: () => void;
   accounts: Account[];
   unreadByAccount: Record<string, number>;
@@ -53,6 +57,7 @@ interface Props {
 
 const navItems = [
   { id: "inbox", label: "Inbox", icon: Inbox },
+  { id: "drafts", label: "Drafts", icon: FileEdit },
   { id: "starred", label: "Starred", icon: Star },
   { id: "sent", label: "Sent", icon: Send },
   { id: "archive", label: "Archive", icon: Archive },
@@ -62,6 +67,7 @@ const navItems = [
 export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeNav, onChangeNav, onAddAccount, accounts, unreadByAccount, totalUnread, onRefresh }: Props & { onRefresh: () => void }) {
   const { user, signOut } = useAuth();
   const push = usePushNotifications(user?.id);
+  const outboxCount = useOutboxCount();
   const [editAccount, setEditAccount] = useState<Account | null>(null);
   const displayLabel = (value: string) => (value ? value[0].toUpperCase() + value.slice(1) : value);
 
@@ -94,10 +100,23 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
         <span className="font-semibold tracking-tight">Unified Inbox Hub</span>
       </div>
 
-      <div className="px-3 pb-3">
+      <div className="px-3 pb-3 space-y-2">
         <Button onClick={onCompose} className="w-full justify-start gap-2 shadow-sm" size="lg">
           <Plus className="size-4" /> Compose
         </Button>
+        <Button variant="outline" className="w-full justify-start gap-2" size="sm" asChild>
+          <Link to="/contacts">
+            <BookUser className="size-4" /> Contacts
+          </Link>
+        </Button>
+        {outboxCount > 0 && (
+          <p className="text-[11px] text-amber-700 dark:text-amber-400 px-1 flex items-center gap-1.5">
+            <Badge variant="secondary" className="font-normal text-[10px] px-1.5 py-0">
+              {outboxCount} queued
+            </Badge>
+            <span className="text-muted-foreground">Sends when online</span>
+          </p>
+        )}
       </div>
 
       <nav className="px-2 space-y-0.5">
@@ -107,7 +126,7 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
           return (
             <button
               key={item.id}
-              onClick={() => onChangeNav(item.id as "inbox" | "starred" | "sent" | "archive" | "trash")}
+              onClick={() => onChangeNav(item.id as "inbox" | "drafts" | "starred" | "sent" | "archive" | "trash")}
               className={cn(
                 "w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors",
                 active
@@ -164,9 +183,13 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
               <button
                 onClick={() => onSelectAccount(acc.id)}
                 className="flex items-center gap-2 min-w-0 flex-1 text-left"
+                title={acc.sync_status === "error" && acc.last_sync_error ? acc.last_sync_error : undefined}
               >
                 <span className="size-2 rounded-full shrink-0" style={{ backgroundColor: acc.color }} />
                 <span className="truncate">{displayLabel(acc.email_address)}</span>
+                {acc.sync_status === "error" && (
+                  <AlertCircle className="size-3.5 shrink-0 text-amber-600" aria-hidden />
+                )}
               </button>
               <div className="flex items-center gap-1 shrink-0">
                 {(unreadByAccount[acc.id] ?? 0) > 0 && (

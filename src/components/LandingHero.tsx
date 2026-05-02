@@ -8,7 +8,7 @@ export const LandingHero = () => {
   }, []);
 
   return (
-    <div className="min-h-[100dvh] flex flex-col lg:flex-row bg-white text-neutral-950 antialiased font-sans">
+    <div className="flex min-h-0 flex-1 flex-col lg:flex-row bg-white text-neutral-950 antialiased font-sans">
       {/* Left: brand + copy */}
       <div className="flex-1 flex flex-col justify-between px-6 pt-8 pb-10 sm:px-10 sm:pt-10 sm:pb-12 lg:px-14 lg:pt-12 lg:pb-14 xl:px-20 xl:pt-16 max-w-[920px] lg:max-w-none">
         <header className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm sm:text-base">
@@ -17,7 +17,7 @@ export const LandingHero = () => {
               <path d="M4 18 L16 2" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" />
               <path d="M7 20 L19 4" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" />
             </svg>
-            <span className="font-semibold tracking-tight lowercase text-lg sm:text-xl">
+            <span className="font-semibold tracking-tight text-lg sm:text-xl">
               Unified Inbox Hub
             </span>
           </span>

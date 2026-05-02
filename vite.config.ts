@@ -36,10 +36,12 @@ export default defineConfig(() => ({
         "favicon-16.png",
         "favicon-32.png",
         "apple-touch-icon.png",
+        "og-image.png",
       ],
       manifest: {
+        id: "/",
         name: "Unified Inbox Hub — Unified inbox",
-        short_name: "Unified Inbox Hub",
+        short_name: "Inbox Hub",
         description: "Gmail and custom domain email in one dashboard.",
         theme_color: "#0f172a",
         background_color: "#0f172a",

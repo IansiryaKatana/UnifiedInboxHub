@@ -101,15 +101,52 @@ export type Database = {
         }
         Relationships: []
       }
+      contacts: {
+        Row: {
+          company: string | null
+          created_at: string
+          display_name: string | null
+          email: string
+          id: string
+          notes: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          company?: string | null
+          created_at?: string
+          display_name?: string | null
+          email: string
+          id?: string
+          notes?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          company?: string | null
+          created_at?: string
+          display_name?: string | null
+          email?: string
+          id?: string
+          notes?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       email_threads: {
         Row: {
           account_id: string
           created_at: string
+          draft_content: Json | null
+          folder: string
+          gmail_label_ids: string[]
           id: string
           last_message_at: string
           message_count: number
           participants: string[] | null
           provider_thread_id: string | null
+          search_tsv: unknown
           snippet: string | null
           subject: string | null
           unread_count: number
@@ -118,6 +155,9 @@ export type Database = {
         Insert: {
           account_id: string
           created_at?: string
+          draft_content?: Json | null
+          folder?: string
+          gmail_label_ids?: string[]
           id?: string
           last_message_at?: string
           message_count?: number
@@ -131,6 +171,9 @@ export type Database = {
         Update: {
           account_id?: string
           created_at?: string
+          draft_content?: Json | null
+          folder?: string
+          gmail_label_ids?: string[]
           id?: string
           last_message_at?: string
           message_count?: number
@@ -154,6 +197,7 @@ export type Database = {
       emails: {
         Row: {
           account_id: string
+          attachments: Json | null
           bcc: string[] | null
           body_html: string | null
           body_text: string | null
@@ -165,6 +209,9 @@ export type Database = {
           is_starred: boolean
           provider_message_id: string | null
           recipient: string
+          references_header: string | null
+          rfc_message_id: string | null
+          search_tsv: unknown
           sender: string
           sender_name: string | null
           sent_at: string
@@ -175,6 +222,7 @@ export type Database = {
         }
         Insert: {
           account_id: string
+          attachments?: Json | null
           bcc?: string[] | null
           body_html?: string | null
           body_text?: string | null
@@ -186,6 +234,8 @@ export type Database = {
           is_starred?: boolean
           provider_message_id?: string | null
           recipient: string
+          references_header?: string | null
+          rfc_message_id?: string | null
           sender: string
           sender_name?: string | null
           sent_at?: string
@@ -196,6 +246,7 @@ export type Database = {
         }
         Update: {
           account_id?: string
+          attachments?: Json | null
           bcc?: string[] | null
           body_html?: string | null
           body_text?: string | null
@@ -207,6 +258,8 @@ export type Database = {
           is_starred?: boolean
           provider_message_id?: string | null
           recipient?: string
+          references_header?: string | null
+          rfc_message_id?: string | null
           sender?: string
           sender_name?: string | null
           sent_at?: string

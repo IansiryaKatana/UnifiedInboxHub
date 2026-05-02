@@ -1,6 +1,7 @@
 // Sync Gmail messages using per-account OAuth tokens (each user's own Gmail).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { notifyNewInboundEmail } from "../_shared/push-notify.ts";
+import { normalizeMessageId } from "../_shared/rfc-mail.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -186,6 +187,9 @@ async function importGmailMessage(
   const fromRaw = getHeader(headers, "From");
   const toRaw = getHeader(headers, "To") ?? String(account.email_address ?? "");
   const dateRaw = getHeader(headers, "Date");
+  const rfc_message_id = normalizeMessageId(getHeader(headers, "Message-ID")) ??
+    normalizeMessageId(`gmail-internal-${ref.id}@invalid.local`);
+  const references_header = getHeader(headers, "References")?.trim() ?? null;
 
   const from = parseAddress(fromRaw);
   const to = parseAddress(toRaw);
@@ -206,8 +210,14 @@ async function importGmailMessage(
   const isUnread = (msg.labelIds ?? []).includes("UNREAD");
 
   let threadId: string | null = null;
+  const labelIds = (msg.labelIds ?? []) as string[];
+  const mergeLabels = (prev: string[] | null | undefined) => {
+    const set = new Set<string>([...(prev ?? []), ...labelIds]);
+    return [...set];
+  };
+
   const { data: existingThread } = await supabase
-    .from("email_threads").select("id, message_count, unread_count")
+    .from("email_threads").select("id, message_count, unread_count, gmail_label_ids")
     .eq("account_id", accountId).eq("provider_thread_id", ref.threadId).maybeSingle();
 
   if (existingThread) {
@@ -216,6 +226,7 @@ async function importGmailMessage(
       last_message_at: sentAt, snippet,
       message_count: (existingThread.message_count ?? 0) + 1,
       unread_count: (existingThread.unread_count ?? 0) + (isUnread ? 1 : 0),
+      gmail_label_ids: mergeLabels(existingThread.gmail_label_ids as string[] | undefined),
     }).eq("id", threadId);
   } else {
     const { data: newThread } = await supabase.from("email_threads").insert({
@@ -223,6 +234,7 @@ async function importGmailMessage(
       subject, snippet,
       participants: [from.email, to.email].filter(Boolean),
       last_message_at: sentAt, message_count: 1, unread_count: isUnread ? 1 : 0,
+      gmail_label_ids: labelIds,
     }).select().single();
     threadId = newThread?.id ?? null;
   }
@@ -232,6 +244,8 @@ async function importGmailMessage(
   const { data: inserted, error: insErr } = await supabase.from("emails").insert({
     user_id: userId, account_id: accountId, thread_id: threadId,
     provider_message_id: ref.id, direction: "inbound",
+    rfc_message_id,
+    references_header,
     sender: from.email, sender_name: from.name, recipient: to.email,
     subject, snippet, body_text: text, body_html: html,
     attachments,

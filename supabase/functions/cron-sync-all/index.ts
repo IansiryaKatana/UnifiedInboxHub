@@ -42,7 +42,19 @@ Deno.serve(async (req) => {
         },
         body: JSON.stringify({ account_id: acc.id }),
       });
-      results.push({ id: acc.id, ok: res.ok, status: res.status });
+      const text = await res.text();
+      let payload: { ok?: boolean; error?: string } = {};
+      try {
+        payload = JSON.parse(text) as typeof payload;
+      } catch { /* non-json */ }
+      const httpOk = res.ok;
+      const bodyOk = payload.ok !== false;
+      results.push({
+        id: acc.id,
+        ok: httpOk && bodyOk,
+        status: res.status,
+        error: payload.ok === false ? payload.error : undefined,
+      });
     } catch (e) {
       results.push({ id: acc.id, ok: false, error: String(e) });
     }

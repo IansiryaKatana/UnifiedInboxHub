@@ -2,6 +2,7 @@
 // Uses npm:imapflow which works in Deno via npm: specifier.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { notifyNewInboundEmail } from "../_shared/push-notify.ts";
+import { normalizeMessageId } from "../_shared/rfc-mail.ts";
 import { ImapFlow } from "npm:imapflow@1.0.165";
 import { simpleParser } from "npm:mailparser@3.7.1";
 
@@ -55,9 +56,49 @@ function sanitizeHtml(html: string): string {
     .replace(/javascript:/gi, "");
 }
 
+function isImapSeen(flags: Set<string> | undefined): boolean {
+  if (!flags?.size) return false;
+  for (const f of flags) {
+    const fl = String(f);
+    if (fl === "\\Seen" || fl === "Seen" || fl.toLowerCase() === "\\seen") return true;
+  }
+  return false;
+}
+
+/** Resolve thread via In-Reply-To / References → existing Message-IDs in DB (RFC-first threading). */
+async function findThreadIdByParentMessageIds(
+  supabase: ReturnType<typeof createClient>,
+  accountId: string,
+  inReplyTo: string | null | undefined,
+  referencesHeader: string | null | undefined,
+): Promise<string | null> {
+  const lookup = async (raw: string | null | undefined) => {
+    const nid = normalizeMessageId(raw ?? null);
+    if (!nid) return null;
+    const { data } = await supabase
+      .from("emails")
+      .select("thread_id")
+      .eq("account_id", accountId)
+      .eq("rfc_message_id", nid)
+      .maybeSingle();
+    return data?.thread_id ?? null;
+  };
+
+  const fromReply = await lookup(inReplyTo ?? null);
+  if (fromReply) return fromReply;
+
+  const refs = (referencesHeader ?? "").trim().split(/\s+/).filter(Boolean);
+  for (let i = refs.length - 1; i >= 0; i--) {
+    const tid = await lookup(refs[i]);
+    if (tid) return tid;
+  }
+  return null;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
+  let accountIdForError: string | undefined;
   try {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -78,7 +119,10 @@ Deno.serve(async (req) => {
     if (!userId) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     const user = { id: userId };
 
-    const { account_id, max_messages } = await req.json();
+    const body = await req.json().catch(() => ({}));
+    const account_id: string | undefined = body.account_id;
+    const max_messages = body.max_messages;
+    accountIdForError = account_id;
     const maxMessages: number | null = typeof max_messages === "number"
       ? Math.max(1, Math.min(max_messages, 5000))
       : null;
@@ -149,14 +193,18 @@ Deno.serve(async (req) => {
       try {
         const range = lastUid > 0 ? `${lastUid + 1}:*` : `1:*`;
         const uids: number[] = [];
-        for await (const msg of client.fetch(range, { uid: true, envelope: true }, { uid: true })) {
+        const uidFlags = new Map<number, Set<string>>();
+        for await (const msg of client.fetch(range, { uid: true, envelope: true, flags: true }, { uid: true })) {
           uids.push(msg.uid);
+          uidFlags.set(msg.uid, msg.flags ? new Set(msg.flags) : new Set());
         }
         const newUids = uids.filter((u) => u > lastUid).sort((a, b) => a - b);
         const toProcess = maxMessages ? newUids.slice(0, maxMessages) : newUids;
 
         scanned = toProcess.length;
         for (const uid of toProcess) {
+          const flagSet = uidFlags.get(uid);
+          const seenOnServer = isImapSeen(flagSet);
           const { content } = await client.download(uid.toString(), undefined, { uid: true });
           const chunks: Uint8Array[] = [];
           for await (const chunk of content) chunks.push(chunk);
@@ -199,11 +247,46 @@ Deno.serve(async (req) => {
           const snippet = text.slice(0, 240);
           const messageId = parsed.messageId ?? `imap-${account_id}-${uid}`;
           const inReply = parsed.inReplyTo ?? null;
+          const refsJoined = Array.isArray(parsed.references)
+            ? parsed.references.map(String).join(" ").trim()
+            : (typeof parsed.references === "string" ? parsed.references.trim() : "") || null;
+          const rfc_message_id = normalizeMessageId(parsed.messageId ?? null) ??
+            normalizeMessageId(`${messageId}@imap.local`);
 
-          // Find thread by Message-ID/In-Reply-To chain (simple: same subject within account)
-          let threadId: string | null = null;
+          const { data: dupRow } = await supabase
+            .from("emails")
+            .select("id")
+            .eq("account_id", account_id)
+            .eq("provider_message_id", messageId)
+            .maybeSingle();
+          if (dupRow?.id) {
+            if (uid > lastUid) lastUid = uid;
+            continue;
+          }
+
+          let threadId: string | null = await findThreadIdByParentMessageIds(
+            supabase,
+            account_id,
+            parsed.inReplyTo ? String(parsed.inReplyTo) : null,
+            refsJoined,
+          );
+
           const normSubj = (subject ?? "").replace(/^(re|fwd):\s*/i, "").trim();
-          if (normSubj) {
+          if (threadId) {
+            const { data: existingTh } = await supabase
+              .from("email_threads")
+              .select("id, message_count, unread_count")
+              .eq("id", threadId)
+              .maybeSingle();
+            if (existingTh) {
+              await supabase.from("email_threads").update({
+                last_message_at: sentAt,
+                snippet,
+                message_count: (existingTh.message_count ?? 0) + 1,
+                unread_count: (existingTh.unread_count ?? 0) + (seenOnServer ? 0 : 1),
+              }).eq("id", threadId);
+            }
+          } else if (normSubj.length >= 2) {
             const { data: existing } = await supabase
               .from("email_threads")
               .select("id, message_count, unread_count")
@@ -218,10 +301,11 @@ Deno.serve(async (req) => {
                 last_message_at: sentAt,
                 snippet,
                 message_count: (existing.message_count ?? 0) + 1,
-                unread_count: (existing.unread_count ?? 0) + 1,
+                unread_count: (existing.unread_count ?? 0) + (seenOnServer ? 0 : 1),
               }).eq("id", threadId);
             }
           }
+
           if (!threadId) {
             const { data: newThread } = await supabase.from("email_threads").insert({
               user_id: user.id,
@@ -232,7 +316,7 @@ Deno.serve(async (req) => {
               participants: [sender, recipient].filter(Boolean),
               last_message_at: sentAt,
               message_count: 1,
-              unread_count: 1,
+              unread_count: seenOnServer ? 0 : 1,
             }).select().single();
             threadId = newThread?.id ?? null;
           }
@@ -244,6 +328,8 @@ Deno.serve(async (req) => {
             thread_id: threadId,
             provider_message_id: messageId,
             direction: "inbound",
+            rfc_message_id,
+            references_header: refsJoined,
             sender,
             sender_name: senderName,
             recipient,
@@ -252,7 +338,7 @@ Deno.serve(async (req) => {
             body_text: text,
             body_html: typeof html === "string" ? html : null,
             attachments,
-            is_read: false,
+            is_read: seenOnServer,
             sent_at: sentAt,
           }).select("id").single();
           if (!insErr && inserted?.id) {
@@ -295,14 +381,18 @@ Deno.serve(async (req) => {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("imap-sync error:", msg);
-    // best-effort error capture
     try {
-      const body = await req.clone().json().catch(() => ({}));
-      if (body?.account_id) {
-        const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-        await supabase.from("email_accounts").update({ sync_status: "error", last_sync_error: msg.slice(0, 500) }).eq("id", body.account_id);
+      if (accountIdForError) {
+        const supabaseErr = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+        await supabaseErr.from("email_accounts").update({
+          sync_status: "error",
+          last_sync_error: msg.slice(0, 500),
+        }).eq("id", accountIdForError);
       }
     } catch { /* ignore */ }
-    return new Response(JSON.stringify({ ok: false, error: msg }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ ok: false, error: msg }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });

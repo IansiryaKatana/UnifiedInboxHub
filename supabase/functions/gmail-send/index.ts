@@ -1,5 +1,8 @@
 // Send a Gmail message via per-account OAuth and persist a copy in emails.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { isUuid, normalizeMessageId, resolveThreadingForSend } from "../_shared/rfc-mail.ts";
+import type { ParentMailRow } from "../_shared/rfc-mail.ts";
+import { resolveAttachmentsForMime, type AttachmentInput } from "../_shared/resolve-attachments.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -75,7 +78,9 @@ function buildRaw({
   subject,
   body,
   htmlBody,
+  messageId,
   inReplyTo,
+  references,
   attachments,
 }: {
   from: string;
@@ -85,7 +90,9 @@ function buildRaw({
   subject: string;
   body: string;
   htmlBody?: string | null;
+  messageId?: string | null;
   inReplyTo?: string | null;
+  references?: string | null;
   attachments?: MailAttachment[];
 }) {
   const mixedBoundary = `mixed_${crypto.randomUUID()}`;
@@ -98,10 +105,9 @@ function buildRaw({
     `Subject: ${subject}`,
     "MIME-Version: 1.0",
   ];
-  if (inReplyTo) {
-    lines.push(`In-Reply-To: ${inReplyTo}`);
-    lines.push(`References: ${inReplyTo}`);
-  }
+  if (messageId) lines.push(`Message-ID: ${messageId}`);
+  if (inReplyTo) lines.push(`In-Reply-To: ${inReplyTo}`);
+  if (references) lines.push(`References: ${references}`);
 
   const hasAttachments = (attachments?.length ?? 0) > 0;
   if (hasAttachments) {
@@ -152,7 +158,7 @@ Deno.serve(async (req) => {
     if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
     const body = await req.json();
-    const { account_id, thread_id, to, cc, bcc, subject, body_text, html_body, in_reply_to, attachments } = body ?? {};
+    const { account_id, thread_id, to, cc, bcc, subject, body_text, html_body, in_reply_to, attachments: rawAttachments } = body ?? {};
     if (!account_id || !to || !body_text) {
       return new Response(JSON.stringify({ error: "account_id, to, body_text required" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
@@ -160,6 +166,22 @@ Deno.serve(async (req) => {
     const { data: account } = await supabase.from("email_accounts").select("*").eq("id", account_id).eq("user_id", user.id).single();
     if (!account) return new Response(JSON.stringify({ error: "Account not found" }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     if (account.provider_type !== "gmail") return new Response(JSON.stringify({ error: "Not a Gmail account" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
+    let parentRow: ParentMailRow | null = null;
+    const ir = typeof in_reply_to === "string" ? in_reply_to.trim() : "";
+    if (ir && isUuid(ir)) {
+      const { data: pr } = await supabase
+        .from("emails")
+        .select("rfc_message_id, references_header")
+        .eq("id", ir)
+        .eq("user_id", user.id)
+        .maybeSingle();
+      if (pr) parentRow = pr as ParentMailRow;
+    }
+
+    const threading = resolveThreadingForSend(ir || null, parentRow, String(account.email_address ?? "mail@localhost"));
+
+    const mimeAttachments = await resolveAttachmentsForMime(supabase, Array.isArray(rawAttachments) ? rawAttachments as AttachmentInput[] : []);
 
     const accessToken = await getValidAccessToken(supabase, account);
 
@@ -171,8 +193,10 @@ Deno.serve(async (req) => {
       subject: subject ?? "(no subject)",
       body: body_text,
       htmlBody: typeof html_body === "string" ? html_body : null,
-      inReplyTo: in_reply_to ?? null,
-      attachments: Array.isArray(attachments) ? attachments : [],
+      messageId: normalizeMessageId(threading.outboundMessageId),
+      inReplyTo: threading.inReplyTo ? normalizeMessageId(threading.inReplyTo) : null,
+      references: threading.references || null,
+      attachments: mimeAttachments,
     });
 
     const sendRes = await fetch(`${GMAIL_API}/users/me/messages/send`, {
@@ -191,23 +215,30 @@ Deno.serve(async (req) => {
         .eq("id", thread_id);
     }
 
+    const storedAttachments = Array.isArray(rawAttachments)
+      ? (rawAttachments as AttachmentInput[]).map((a) => ({
+        filename: a.filename,
+        mime_type: a.mime_type || "application/octet-stream",
+        size: a.size ?? 0,
+        inline: false,
+        content_id: null,
+        data_base64: a.storage_path ? null : a.data_base64 ?? null,
+        storage_path: a.storage_path ?? null,
+      }))
+      : [];
+
     await supabase.from("emails").insert({
       user_id: user.id, account_id, thread_id: thread_id ?? null,
       provider_message_id: sendData.id ?? null, direction: "outbound",
+      rfc_message_id: threading.outboundMessageId,
+      references_header: threading.references || null,
       sender: account.email_address, sender_name: account.display_name, recipient: to,
       cc: Array.isArray(cc) ? cc : [],
       bcc: Array.isArray(bcc) ? bcc : [],
       subject: subject ?? "(no subject)", snippet: body_text.slice(0, 140),
       body_text,
       body_html: typeof html_body === "string" ? html_body : null,
-      attachments: Array.isArray(attachments) ? attachments.map((a: MailAttachment) => ({
-        filename: a.filename,
-        mime_type: a.mime_type,
-        size: a.size ?? 0,
-        inline: false,
-        content_id: null,
-        data_base64: a.data_base64 ?? null,
-      })) : [],
+      attachments: storedAttachments,
       is_read: true,
       sent_at: sentAt,
     });
@@ -218,6 +249,10 @@ Deno.serve(async (req) => {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("gmail-send error:", msg);
-    return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    const reconnect = /OAuth|token|refresh|401|403/i.test(msg);
+    return new Response(JSON.stringify({ error: msg, code: reconnect ? "RECONNECT_GMAIL" : undefined }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });

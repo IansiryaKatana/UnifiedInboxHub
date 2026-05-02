@@ -29,6 +29,12 @@ for (const [name, size] of outputs) {
   writeFileSync(join(root, "public", `${name}.png`), buf);
 }
 
+const ogBuf = await sharp(Buffer.from(svg))
+  .resize(1200, 630, { fit: "cover", position: "centre" })
+  .png()
+  .toBuffer();
+writeFileSync(join(root, "public", "og-image.png"), ogBuf);
+
 console.log(
-  "Wrote public/pwa-192.png, pwa-512.png, favicon-16.png, favicon-32.png, apple-touch-icon.png",
+  "Wrote public/pwa-*.png, favicon-*.png, apple-touch-icon.png, og-image.png",
 );

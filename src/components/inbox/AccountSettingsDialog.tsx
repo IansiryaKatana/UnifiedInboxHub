@@ -11,6 +11,15 @@ import { Loader2, RefreshCw, Trash2, Eye, EyeOff } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
 import { useIsMobile } from "@/hooks/use-mobile";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 interface Account {
   id: string;
@@ -59,6 +68,11 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
   });
   const [showImapPassword, setShowImapPassword] = useState(false);
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+  const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) setRemoveConfirmOpen(false);
+  }, [open]);
 
   useEffect(() => {
     if (!account) return;
@@ -138,7 +152,7 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
     }
   };
 
-  const removeAccount = async () => {
+  const executeRemoveAccount = async () => {
     if (!account) return;
     setRemoving(true);
     try {
@@ -151,6 +165,7 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
         if (error) throw new Error(error.message);
       }
       toast.success("Account removed");
+      setRemoveConfirmOpen(false);
       onOpenChange(false);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
@@ -160,6 +175,7 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
   };
 
   return (
+    <>
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
         side={isMobile ? "bottom" : "right"}
@@ -288,9 +304,15 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
                   {syncing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                   {syncing ? "Syncing..." : "Sync now"}
                 </Button>
-                <Button variant="destructive" onClick={removeAccount} disabled={removing} className="w-full gap-2">
-                  {removing ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  {removing ? "Removing..." : "Remove account"}
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={() => setRemoveConfirmOpen(true)}
+                  disabled={removing}
+                  className="w-full gap-2"
+                >
+                  <Trash2 className="size-4" />
+                  Remove account
                 </Button>
               </TabsContent>
             </div>
@@ -305,5 +327,37 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
         )}
       </SheetContent>
     </Sheet>
+
+    <AlertDialog
+      open={removeConfirmOpen}
+      onOpenChange={(next) => {
+        if (!removing) setRemoveConfirmOpen(next);
+      }}
+    >
+      <AlertDialogContent className="gap-3 p-4 sm:p-5">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Remove this account?</AlertDialogTitle>
+          <AlertDialogDescription>
+            {account
+              ? `All synced mail for ${account.email_address} will be deleted from this app. This cannot be undone.`
+              : "This account will be removed. This cannot be undone."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="gap-2 sm:gap-2">
+          <AlertDialogCancel disabled={removing}>Cancel</AlertDialogCancel>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={removing}
+            className="gap-2 sm:ml-0"
+            onClick={() => void executeRemoveAccount()}
+          >
+            {removing ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+            {removing ? "Removing…" : "Remove account"}
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    </>
   );
 }
