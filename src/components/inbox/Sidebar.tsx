@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
-import { Inbox, Send, Star, Archive, Trash2, Plus, Mail, LogOut, Menu, Settings, Bell } from "lucide-react";
+import { Inbox, Send, Star, Archive, Trash2, Plus, LogOut, Menu, Settings, Bell } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
@@ -82,10 +82,16 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
   const inner = (
     <div className="w-full md:w-64 bg-sidebar md:border-r border-sidebar-border flex flex-col h-full">
       <div className="p-4 flex items-center gap-2">
-        <div className="size-8 rounded-lg bg-primary grid place-items-center">
-          <Mail className="size-4 text-primary-foreground" />
-        </div>
-        <span className="font-semibold tracking-tight">Inboxly</span>
+        <img
+          src="/pwa-192.png"
+          alt=""
+          width={32}
+          height={32}
+          className="size-8 rounded-lg object-cover shrink-0"
+          decoding="async"
+          aria-hidden
+        />
+        <span className="font-semibold tracking-tight">Unified Inbox Hub</span>
       </div>
 
       <div className="px-3 pb-3">
@@ -230,7 +236,7 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
               <AlertDialogHeader>
                 <AlertDialogTitle>Sign out?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  You will be logged out of Inboxly on this device.
+                  You will be logged out of Unified Inbox Hub on this device.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>

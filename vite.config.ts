@@ -38,8 +38,8 @@ export default defineConfig(() => ({
         "apple-touch-icon.png",
       ],
       manifest: {
-        name: "Inboxly — Unified inbox",
-        short_name: "Inboxly",
+        name: "Unified Inbox Hub — Unified inbox",
+        short_name: "Unified Inbox Hub",
         description: "Gmail and custom domain email in one dashboard.",
         theme_color: "#0f172a",
         background_color: "#0f172a",

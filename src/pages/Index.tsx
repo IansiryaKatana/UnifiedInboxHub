@@ -33,7 +33,7 @@ const Index = () => {
   const [mailboxView, setMailboxView] = useState<MailboxView>("inbox");
 
   useEffect(() => {
-    document.title = "Inboxly — Unified email dashboard";
+    document.title = "Unified Inbox Hub — Unified email dashboard";
   }, []);
 
   useEffect(() => {

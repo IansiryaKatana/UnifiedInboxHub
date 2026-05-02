@@ -21,7 +21,7 @@ export default function Auth() {
   const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
-    document.title = "Sign in — Inboxly";
+    document.title = "Sign in — Unified Inbox Hub";
   }, []);
 
   if (authLoading) return null;
@@ -86,7 +86,7 @@ export default function Auth() {
             decoding="async"
             aria-hidden
           />
-          <h1 className="text-2xl font-semibold tracking-tight">Inboxly</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Unified Inbox Hub</h1>
         </div>
 
         <Card className="p-6 shadow-lg">
