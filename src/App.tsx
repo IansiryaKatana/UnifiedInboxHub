@@ -14,6 +14,8 @@ import NotFound from "./pages/NotFound.tsx";
 import PrivacyPolicy from "./pages/PrivacyPolicy.tsx";
 import TermsOfService from "./pages/TermsOfService.tsx";
 import Contacts from "./pages/Contacts.tsx";
+import ResetPassword from "./pages/ResetPassword.tsx";
+import AuthConfirmed from "./pages/AuthConfirmed.tsx";
 
 const queryClient = new QueryClient();
 
@@ -25,6 +27,8 @@ function AppRoutes() {
         <Routes>
           <Route path="/" element={<Index />} />
           <Route path="/auth" element={<Auth />} />
+          <Route path="/auth/reset-password" element={<ResetPassword />} />
+          <Route path="/auth/confirmed" element={<AuthConfirmed />} />
           <Route path="/contacts" element={<Contacts />} />
           <Route path="/privacy" element={<PrivacyPolicy />} />
           <Route path="/terms" element={<TermsOfService />} />
