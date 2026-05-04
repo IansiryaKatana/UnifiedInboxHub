@@ -8,49 +8,49 @@ export const LandingHero = () => {
   }, []);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col lg:flex-row bg-white text-neutral-950 antialiased font-sans">
+    <div className="flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-white text-neutral-950 antialiased font-sans lg:flex-row lg:overflow-visible">
       {/* Left: brand + copy */}
-      <div className="flex-1 flex flex-col justify-between px-6 pt-8 pb-10 sm:px-10 sm:pt-10 sm:pb-12 lg:px-14 lg:pt-12 lg:pb-14 xl:px-20 xl:pt-16 max-w-[920px] lg:max-w-none">
-        <header className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm sm:text-base">
+      <div className="flex min-h-0 flex-1 flex-col justify-between overflow-hidden px-5 pt-5 pb-5 md:px-10 md:pt-10 md:pb-12 lg:max-w-none lg:overflow-visible lg:px-14 lg:pt-12 lg:pb-14 xl:px-20 xl:pt-16 max-w-[920px]">
+        <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 text-sm md:text-base">
           <span className="flex items-center gap-2.5 shrink-0" aria-hidden>
             <svg width="22" height="22" viewBox="0 0 22 22" className="text-neutral-950">
               <path d="M4 18 L16 2" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" />
               <path d="M7 20 L19 4" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" />
             </svg>
-            <span className="font-semibold tracking-tight text-lg sm:text-xl">
+            <span className="font-semibold tracking-tight text-lg md:text-xl">
               Unified Inbox Hub
             </span>
           </span>
-          <span className="hidden sm:inline h-4 w-px bg-neutral-300 shrink-0" aria-hidden />
-          <span className="text-neutral-500 font-normal text-sm sm:text-[15px] w-full sm:w-auto pl-[30px] sm:pl-0">
+          <span className="hidden md:inline h-4 w-px bg-neutral-300 shrink-0" aria-hidden />
+          <span className="w-full pl-[30px] text-sm font-normal text-neutral-500 md:w-auto md:pl-0 md:text-[15px]">
             Built for unified communications
           </span>
         </header>
 
-        <div className="flex-1 flex flex-col justify-center py-12 lg:py-16 max-w-xl lg:max-w-2xl">
-          <h1 className="text-[2.35rem] leading-[1.08] sm:text-5xl sm:leading-[1.06] lg:text-[3.25rem] lg:leading-[1.05] xl:text-[3.5rem] font-bold tracking-tight text-neutral-950">
+        <div className="flex min-h-0 flex-1 flex-col justify-center py-4 max-md:py-3 md:py-12 lg:py-16 max-w-xl lg:max-w-2xl">
+          <h1 className="text-[1.625rem] font-bold leading-[1.12] tracking-tight text-neutral-950 max-md:tracking-tight md:text-5xl md:leading-[1.06] lg:text-[3.25rem] lg:leading-[1.05] xl:text-[3.5rem]">
             The central command
             <br />
             for all your
             <br />
             communications.
           </h1>
-          <p className="mt-6 text-base sm:text-lg text-neutral-600 font-normal leading-relaxed max-w-lg">
+          <p className="mt-3 max-w-lg text-sm leading-snug text-neutral-600 md:mt-6 md:text-lg md:leading-relaxed">
             Secure, modular workspace that brings every inbox together. Consolidate email and messages
             into one calm surface—stay focused, stay organized.
           </p>
-          <div className="mt-10">
+          <div className="mt-5 md:mt-10">
             <Button
               asChild
               size="lg"
-              className="rounded-md bg-neutral-950 text-white hover:bg-neutral-900 px-8 h-12 text-[15px] font-medium shadow-none"
+              className="h-11 rounded-md bg-neutral-950 px-7 text-[14px] font-medium text-white shadow-none hover:bg-neutral-900 md:h-12 md:px-8 md:text-[15px]"
             >
               <Link to="/auth">Get started</Link>
             </Button>
           </div>
         </div>
 
-        <p className="text-xs sm:text-sm text-neutral-400 font-normal max-w-md leading-relaxed">
+        <p className="max-w-md shrink-0 text-[11px] leading-snug text-neutral-400 md:text-sm md:leading-relaxed">
           TLS encryption and OAuth sign-in—your mail stays private to you.{" "}
           <span className="text-neutral-500">
             <Link to="/privacy" className="underline underline-offset-2 hover:text-neutral-700">
@@ -66,8 +66,8 @@ export const LandingHero = () => {
         </p>
       </div>
 
-      {/* Right: abstract gradient panel */}
-      <div className="relative lg:flex-[0_0_42%] xl:flex-[0_0_40%] min-h-[220px] sm:min-h-[280px] lg:min-h-0 w-full overflow-hidden">
+      {/* Right: abstract gradient panel — fixed slice on mobile so the hero fits 100dvh without scroll */}
+      <div className="relative h-[26dvh] max-h-[200px] min-h-0 w-full shrink-0 overflow-hidden md:h-auto md:max-h-none md:min-h-[280px] lg:flex-[0_0_42%] lg:min-h-0 xl:flex-[0_0_40%]">
         <div
           className="absolute inset-0 origin-top-right scale-110 lg:scale-100"
           style={{

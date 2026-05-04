@@ -184,7 +184,7 @@ const Index = () => {
   if (authLoading) return <div className="min-h-screen grid place-items-center text-sm text-muted-foreground">Loading…</div>;
   if (!session) {
     return (
-      <div className="flex h-full min-h-0 flex-1 flex-col overflow-y-auto">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden max-md:min-h-0">
         <LandingHero />
       </div>
     );
