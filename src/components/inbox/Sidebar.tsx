@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { Inbox, Send, Star, Archive, Trash2, FileEdit, Plus, LogOut, Menu, Settings, Bell, AlertCircle, BookUser } from "lucide-react";
@@ -69,7 +69,33 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
   const push = usePushNotifications(user?.id);
   const outboxCount = useOutboxCount();
   const [editAccount, setEditAccount] = useState<Account | null>(null);
+  const [profileDisplayName, setProfileDisplayName] = useState<string | null>(null);
   const displayLabel = (value: string) => (value ? value[0].toUpperCase() + value.slice(1) : value);
+
+  useEffect(() => {
+    if (!user?.id) {
+      setProfileDisplayName(null);
+      return;
+    }
+    void supabase
+      .from("profiles")
+      .select("display_name")
+      .eq("id", user.id)
+      .maybeSingle()
+      .then(({ data }) => {
+        const n = data?.display_name?.trim();
+        setProfileDisplayName(n || null);
+      });
+  }, [user?.id]);
+
+  const meta = user?.user_metadata as { display_name?: unknown; full_name?: unknown } | undefined;
+  const metaDisplay =
+    typeof meta?.display_name === "string" ? meta.display_name.trim() : typeof meta?.full_name === "string" ? meta.full_name.trim() : "";
+  const primaryName = (profileDisplayName?.trim() || metaDisplay || "").trim();
+  const userEmail = user?.email?.trim() ?? "";
+  const sidebarTitle = primaryName || userEmail || "Account";
+  const showEmailUnderName = Boolean(primaryName && userEmail && primaryName !== userEmail);
+  const avatarInitial = (primaryName[0] ?? userEmail[0] ?? "U").toUpperCase();
 
   const deleteAccount = async (acc: Account) => {
     // Cascade-delete emails + threads first (no FK cascade in schema)
@@ -244,10 +270,17 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
       <div className="mt-auto p-3 border-t border-sidebar-border">
         <div className="flex items-center gap-2 px-2 py-2">
           <div className="size-8 rounded-full bg-primary/10 grid place-items-center text-xs font-semibold text-primary">
-            {user?.email?.[0]?.toUpperCase() ?? "U"}
+            {avatarInitial}
           </div>
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-medium truncate">{user?.email}</p>
+            <p className="text-xs font-medium truncate" title={showEmailUnderName ? userEmail : undefined}>
+              {sidebarTitle}
+            </p>
+            {showEmailUnderName && (
+              <p className="text-[10px] text-muted-foreground truncate" title={userEmail}>
+                {userEmail}
+              </p>
+            )}
           </div>
           <AlertDialog>
             <AlertDialogTrigger asChild>
