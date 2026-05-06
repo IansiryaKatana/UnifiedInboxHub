@@ -64,7 +64,7 @@ const Index = () => {
     refetch: refetchThreads,
   } = useQuery({
     queryKey: ["inbox-threads", user?.id, accountIdsKey],
-    queryFn: () => fetchEnrichedThreads(user!.id, accountsById),
+    queryFn: () => fetchEnrichedThreads(),
     enabled: !!user?.id,
     staleTime: 8_000,
     refetchOnWindowFocus: true,

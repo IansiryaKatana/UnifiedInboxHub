@@ -17,7 +17,15 @@ import Contacts from "./pages/Contacts.tsx";
 import ResetPassword from "./pages/ResetPassword.tsx";
 import AuthConfirmed from "./pages/AuthConfirmed.tsx";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      /** Avoid long “stuck loading” loops on flaky networks; pages can still opt into more retries. */
+      retry: 1,
+      refetchOnReconnect: true,
+    },
+  },
+});
 
 /** Inbox and app routes need a locked viewport; legal pages scroll the document. */
 function AppShell() {

@@ -365,6 +365,12 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      get_inbox_threads_enriched: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          result: Json
+        }[]
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]

@@ -7,6 +7,16 @@ import { Reply, Forward, Archive, Trash2, Star, MoreHorizontal, Send, Lock, X, A
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { ComposeRichEditor } from "./ComposeRichEditor.tsx";
 import { Progress } from "@/components/ui/progress";
 import { htmlToText, escapeHtml } from "@/lib/email-html";
@@ -86,6 +96,7 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
   const [starringId, setStarringId] = useState<string | null>(null);
   const [acting, setActing] = useState<"archive" | "trash" | null>(null);
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
+  const [trashConfirmOpen, setTrashConfirmOpen] = useState(false);
   /** `${messageId}-${attachmentIndex}` → signed download URL */
   const [signedAttachmentUrls, setSignedAttachmentUrls] = useState<Record<string, string>>({});
 
@@ -174,6 +185,10 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
       cancelled = true;
     };
   }, [threadId, messages]);
+
+  useEffect(() => {
+    setTrashConfirmOpen(false);
+  }, [threadId]);
 
   if (!threadId) {
     return (
@@ -487,7 +502,7 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
             size="icon"
             aria-label="Delete"
             className="hidden sm:inline-flex"
-            onClick={() => moveThread("trash")}
+            onClick={() => setTrashConfirmOpen(true)}
             disabled={acting !== null || thread?.folder === "trash"}
           >
             <Trash2 className="size-4" />
@@ -552,8 +567,8 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
               variant="destructive"
               className="justify-start gap-2"
               onClick={() => {
-                void moveThread("trash");
                 setMobileActionsOpen(false);
+                setTrashConfirmOpen(true);
               }}
               disabled={acting !== null || thread?.folder === "trash"}
             >
@@ -563,6 +578,34 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
           </div>
         </SheetContent>
       </Sheet>
+
+      <AlertDialog open={trashConfirmOpen} onOpenChange={setTrashConfirmOpen}>
+        <AlertDialogContent className="max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:top-auto max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-t-2xl max-md:rounded-b-none max-md:border-b-0 max-md:p-4 max-md:pt-5 max-md:mb-0">
+          <AlertDialogHeader className="relative max-md:pr-10 sm:pr-10">
+            <button
+              type="button"
+              className="absolute right-0 top-0 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+              aria-label="Close"
+              onClick={() => setTrashConfirmOpen(false)}
+            >
+              <X className="size-4" />
+            </button>
+            <AlertDialogTitle>Move this conversation to Trash?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The thread will leave your inbox and appear in Trash. You can move it back later unless you permanently delete it from Trash.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="max-md:flex-col max-md:gap-2 max-md:space-x-0 sm:space-x-2">
+            <AlertDialogCancel className="max-md:m-0">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90 focus:ring-destructive max-md:m-0"
+              onClick={() => void moveThread("trash")}
+            >
+              Move to Trash
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <div className="flex-1 overflow-y-auto scrollbar-thin px-3 md:px-6 py-4 md:py-6 space-y-4 min-w-0">
         {loading && <p className="text-sm text-muted-foreground">Loading…</p>}

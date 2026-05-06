@@ -30,11 +30,20 @@ export function useForegroundMailboxSync(
     if (now - lastRunRef.current < MIN_GAP_MS && lastRunRef.current !== 0) return;
     lastRunRef.current = now;
 
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const accessToken = session?.access_token;
+    if (!accessToken) return;
+
+    const authHeaders = { Authorization: `Bearer ${accessToken}` };
+
     await Promise.allSettled(
       list.map(async (acc) => {
         try {
           if (acc.provider_type === "gmail") {
             const { error } = await supabase.functions.invoke("gmail-sync", {
+              headers: authHeaders,
               body: {
                 account_id: acc.id,
                 max_pages: 1,
@@ -46,6 +55,7 @@ export function useForegroundMailboxSync(
             const notBefore = imapNextAllowedRef.current[acc.id] ?? 0;
             if (Date.now() < notBefore) return;
             const { data, error } = await supabase.functions.invoke("imap-sync", {
+              headers: authHeaders,
               body: { account_id: acc.id, max_messages: 80 },
             });
             if (error || (data && typeof data === "object" && (data as { ok?: boolean }).ok === false)) {
