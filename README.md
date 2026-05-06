@@ -37,3 +37,8 @@ At minimum, configure:
 
 - This codebase is actively aligned to live Supabase data and real CRUD flows.
 - Keep schema migrations in `supabase/migrations` and function changes in `supabase/functions`.
+
+## IMAP Reliability Notes
+
+- `imap-sync` now applies safe parsing and per-message error isolation to reduce hard-fail sync runs.
+- Foreground polling applies automatic cooldown for IMAP accounts that fail (`~3 minutes`) to prevent repeated noisy 500 retries.

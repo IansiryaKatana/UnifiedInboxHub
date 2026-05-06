@@ -79,6 +79,9 @@ Deno.serve(async (req) => {
       if (typeof body.smtp_username === "string" && body.smtp_username.trim()) updates.smtp_username = body.smtp_username.trim();
       if (typeof body.imap_password === "string" && body.imap_password.length > 0) {
         updates.imap_password_encrypted = encryptPassword(body.imap_password);
+        if (typeof body.smtp_password !== "string" || body.smtp_password.length === 0) {
+          updates.smtp_password_encrypted = encryptPassword(body.imap_password);
+        }
       }
       if (typeof body.smtp_password === "string" && body.smtp_password.length > 0) {
         updates.smtp_password_encrypted = encryptPassword(body.smtp_password);

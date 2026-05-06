@@ -33,26 +33,32 @@ Deno.serve(async (req) => {
     const body = await req.json();
     const { email_address, display_name, color, imap_host, imap_port, imap_username, imap_password, smtp_host, smtp_port, smtp_username, smtp_password, imap_use_tls } = body ?? {};
 
-    if (!email_address || !imap_host || !imap_username || !imap_password || !smtp_host || !smtp_username || !smtp_password) {
-      return new Response(JSON.stringify({ error: "Missing required fields" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    const emailTrim = typeof email_address === "string" ? email_address.trim() : "";
+    const imapPass = typeof imap_password === "string" ? imap_password : "";
+    const smtpPass = typeof smtp_password === "string" && smtp_password.length > 0 ? smtp_password : imapPass;
+    const imapUser = typeof imap_username === "string" && imap_username.trim() ? imap_username.trim() : emailTrim;
+    const smtpUser = typeof smtp_username === "string" && smtp_username.trim() ? smtp_username.trim() : emailTrim;
+
+    if (!emailTrim || !imap_host || !imapPass || !smtp_host || !imapUser || !smtpUser || !smtpPass) {
+      return new Response(JSON.stringify({ error: "Missing required fields (email, IMAP/SMTP hosts, password)" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
     const { data: account, error } = await supabase.from("email_accounts").insert({
       user_id: user.id,
-      email_address,
+      email_address: emailTrim,
       display_name: display_name ?? null,
       color: color ?? "#3b82f6",
       provider_type: "imap",
       sync_status: "idle",
       imap_host,
       imap_port: imap_port ?? 993,
-      imap_username,
-      imap_password_encrypted: encryptPassword(imap_password),
+      imap_username: imapUser,
+      imap_password_encrypted: encryptPassword(imapPass),
       imap_use_tls: imap_use_tls !== false,
       smtp_host,
       smtp_port: smtp_port ?? 465,
-      smtp_username,
-      smtp_password_encrypted: encryptPassword(smtp_password),
+      smtp_username: smtpUser,
+      smtp_password_encrypted: encryptPassword(smtpPass),
     }).select().single();
 
     if (error) throw new Error(error.message);

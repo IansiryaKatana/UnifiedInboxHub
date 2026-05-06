@@ -8,7 +8,7 @@ import { Loader2, Eye, EyeOff } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
-type Phase = "request" | "update" | "sent";
+type Phase = "request" | "update" | "sent" | "invalid";
 
 function hashHasRecoveryType(): boolean {
   if (typeof window === "undefined") return false;
@@ -17,9 +17,19 @@ function hashHasRecoveryType(): boolean {
   return params.get("type") === "recovery";
 }
 
+function searchHasRecoveryType(): boolean {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.get("type") === "recovery" || Boolean(params.get("code"));
+}
+
+function hasRecoveryIntent(): boolean {
+  return hashHasRecoveryType() || searchHasRecoveryType();
+}
+
 export default function ResetPassword() {
   const navigate = useNavigate();
-  const [phase, setPhase] = useState<Phase>(() => (hashHasRecoveryType() ? "update" : "request"));
+  const [phase, setPhase] = useState<Phase>(() => (hasRecoveryIntent() ? "update" : "request"));
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -32,7 +42,7 @@ export default function ResetPassword() {
   }, []);
 
   useEffect(() => {
-    if (hashHasRecoveryType()) {
+    if (hasRecoveryIntent()) {
       setPhase("update");
     }
 
@@ -44,12 +54,33 @@ export default function ResetPassword() {
       }
     });
 
-    void supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session && hashHasRecoveryType()) {
-        setPhase("update");
+    void (async () => {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("code");
+      if (code) {
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) {
+          setPhase("invalid");
+          toast.error("This reset link is invalid or expired. Request a new link.");
+          setAuthChecked(true);
+          return;
+        }
       }
+
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (hasRecoveryIntent()) {
+        if (session) {
+          setPhase("update");
+        } else {
+          setPhase("invalid");
+        }
+      }
+
       setAuthChecked(true);
-    });
+    })();
 
     return () => subscription.unsubscribe();
   }, []);
@@ -81,6 +112,16 @@ export default function ResetPassword() {
       toast.error("Passwords do not match.");
       return;
     }
+
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!session) {
+      toast.error("This reset session is no longer valid. Request a new reset link.");
+      setPhase("invalid");
+      return;
+    }
+
     setLoading(true);
     const { error } = await supabase.auth.updateUser({ password });
     setLoading(false);
@@ -92,7 +133,7 @@ export default function ResetPassword() {
     navigate("/", { replace: true });
   };
 
-  if (!authChecked && phase === "request") {
+  if (!authChecked) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-soft via-background to-background p-4">
         <Loader2 className="size-8 animate-spin text-muted-foreground" aria-label="Loading" />
@@ -198,6 +239,25 @@ export default function ResetPassword() {
                 Update password
               </Button>
             </form>
+          )}
+
+          {phase === "invalid" && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-medium">Reset link expired or invalid</h2>
+              <p className="text-sm text-muted-foreground">
+                This reset link is no longer valid. Request a new link and use the latest email message.
+              </p>
+              <Button
+                type="button"
+                className="w-full"
+                onClick={() => {
+                  setPhase("request");
+                  void navigate("/auth/reset-password", { replace: true });
+                }}
+              >
+                Request a new reset link
+              </Button>
+            </div>
           )}
 
         </Card>

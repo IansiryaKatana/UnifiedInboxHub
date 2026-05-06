@@ -20,6 +20,22 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { parseEdgeFunctionFailure } from "@/lib/edge-function-error";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  getMailProviderPreset,
+  MAIL_PRESET_CUSTOM,
+  MAIL_PRESET_NONE,
+  MAIL_PROVIDER_PRESETS,
+  matchMailProviderPresetFromHosts,
+} from "@/lib/mail-provider-presets";
 
 interface Account {
   id: string;
@@ -27,6 +43,7 @@ interface Account {
   display_name: string | null;
   color: string;
   provider_type: string;
+  last_sync_error?: string | null;
   imap_host?: string | null;
   imap_port?: number | null;
   imap_username?: string | null;
@@ -57,17 +74,14 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
     color: "#3b82f6",
     imap_host: "",
     imap_port: 993,
-    imap_username: "",
-    imap_password: "",
     imap_use_tls: true,
     smtp_host: "",
     smtp_port: 465,
-    smtp_username: "",
-    smtp_password: "",
     smtp_use_tls: true,
+    mailbox_password: "",
   });
-  const [showImapPassword, setShowImapPassword] = useState(false);
-  const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+  const [imapMailProvider, setImapMailProvider] = useState<string>(MAIL_PRESET_NONE);
+  const [showMailboxPassword, setShowMailboxPassword] = useState(false);
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
 
   useEffect(() => {
@@ -82,16 +96,35 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
       color: account.color ?? "#3b82f6",
       imap_host: account.imap_host ?? "",
       imap_port: account.imap_port ?? 993,
-      imap_username: account.imap_username ?? "",
-      imap_password: "",
       imap_use_tls: account.imap_use_tls ?? true,
       smtp_host: account.smtp_host ?? "",
       smtp_port: account.smtp_port ?? 465,
-      smtp_username: account.smtp_username ?? "",
-      smtp_password: "",
       smtp_use_tls: account.smtp_use_tls ?? true,
+      mailbox_password: "",
     });
+    setImapMailProvider(
+      account.provider_type === "imap"
+        ? matchMailProviderPresetFromHosts(account.imap_host ?? "", account.smtp_host ?? "")
+        : MAIL_PRESET_NONE,
+    );
+    setShowMailboxPassword(false);
   }, [account?.id, open]);
+
+  const applyMailProviderPreset = (id: string) => {
+    setImapMailProvider(id);
+    if (id === MAIL_PRESET_NONE || id === MAIL_PRESET_CUSTOM) return;
+    const preset = getMailProviderPreset(id);
+    if (!preset) return;
+    setForm((prev) => ({
+      ...prev,
+      imap_host: preset.imap_host,
+      imap_port: preset.imap_port,
+      imap_use_tls: preset.imap_use_tls,
+      smtp_host: preset.smtp_host,
+      smtp_port: preset.smtp_port,
+      smtp_use_tls: preset.smtp_use_tls,
+    }));
+  };
 
   const tabProgress = tab === "setup" ? 33 : tab === "settings" ? 66 : 100;
 
@@ -99,26 +132,29 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
     if (!account) return;
     setSaving(true);
     try {
+      const email = form.email_address.trim();
       const { data, error } = await supabase.functions.invoke("account-credentials-update", {
         body: {
           account_id: account.id,
-          email_address: form.email_address.trim(),
+          email_address: email,
           display_name: form.display_name.trim(),
           color: form.color,
-          ...(account.provider_type === "imap" ? {
-            imap_host: form.imap_host.trim(),
-            imap_port: Number(form.imap_port),
-            imap_username: form.imap_username.trim(),
-            imap_password: form.imap_password.trim() || undefined,
-            imap_use_tls: form.imap_use_tls,
-            smtp_host: form.smtp_host.trim(),
-            smtp_port: Number(form.smtp_port),
-            smtp_username: form.smtp_username.trim(),
-            smtp_password: form.smtp_password.trim() || undefined,
-          } : {}),
+          ...(account.provider_type === "imap"
+            ? {
+                imap_host: form.imap_host.trim(),
+                imap_port: Number(form.imap_port),
+                imap_username: email,
+                imap_password: form.mailbox_password.trim() || undefined,
+                imap_use_tls: form.imap_use_tls,
+                smtp_host: form.smtp_host.trim(),
+                smtp_port: Number(form.smtp_port),
+                smtp_username: email,
+                smtp_password: form.mailbox_password.trim() || undefined,
+              }
+            : {}),
         },
       });
-      if (error || !data?.ok) throw new Error(error?.message ?? data?.error ?? "Failed to save settings");
+      if (error || !data?.ok) throw new Error(parseEdgeFunctionFailure(data, error));
       toast.success("Account settings updated.");
       await onSaved();
       onOpenChange(false);
@@ -140,8 +176,12 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
         });
         toast.success(imported > 0 ? `Imported ${imported} new messages` : "Inbox is up to date");
       } else {
-        const { data, error } = await supabase.functions.invoke("imap-sync", { body: { account_id: account.id } });
-        if (error || !data?.ok) throw new Error(error?.message ?? data?.error ?? "Sync failed");
+        const { data, error } = await supabase.functions.invoke("imap-sync", {
+          body: { account_id: account.id, max_messages: 80 },
+        });
+        if (error || !data?.ok) {
+          throw new Error(parseEdgeFunctionFailure(data, error));
+        }
         toast.success(`Synced ${data.imported ?? 0} emails`);
       }
       await onSaved();
@@ -219,7 +259,28 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
               <TabsContent value="settings" className="space-y-3 m-0">
                 {account.provider_type === "imap" ? (
                   <>
-                    <div className="grid grid-cols-2 gap-3">
+                    <p className="text-sm text-muted-foreground">
+                      Same layout as “Add account”: pick a provider to fill hosts and ports. IMAP/SMTP usernames use your
+                      email from Setup. Enter a new password only if you want to replace the stored mailbox password.
+                    </p>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="edit-imap-provider">Mail provider</Label>
+                      <Select value={imapMailProvider} onValueChange={applyMailProviderPreset}>
+                        <SelectTrigger id="edit-imap-provider" className="w-full">
+                          <SelectValue placeholder="Choose provider…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={MAIL_PRESET_NONE}>Let me enter servers manually</SelectItem>
+                          {MAIL_PROVIDER_PRESETS.map((p) => (
+                            <SelectItem key={p.id} value={p.id} title={p.hint}>
+                              {p.label}
+                            </SelectItem>
+                          ))}
+                          <SelectItem value={MAIL_PRESET_CUSTOM}>Other — keep current fields, edit below</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div className="space-y-1.5">
                         <Label>IMAP host</Label>
                         <Input value={form.imap_host} onChange={(e) => setForm((v) => ({ ...v, imap_host: e.target.value }))} />
@@ -228,31 +289,6 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
                         <Label>IMAP port</Label>
                         <Input type="number" value={form.imap_port} onChange={(e) => setForm((v) => ({ ...v, imap_port: +e.target.value }))} />
                       </div>
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>IMAP username</Label>
-                      <Input value={form.imap_username} onChange={(e) => setForm((v) => ({ ...v, imap_username: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>New IMAP password (optional)</Label>
-                      <div className="relative">
-                        <Input
-                          type={showImapPassword ? "text" : "password"}
-                          value={form.imap_password}
-                          onChange={(e) => setForm((v) => ({ ...v, imap_password: e.target.value }))}
-                          className="pr-10"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowImapPassword(v => !v)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                          aria-label={showImapPassword ? "Hide IMAP password" : "Show IMAP password"}
-                        >
-                          {showImapPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1.5">
                         <Label>SMTP host</Label>
                         <Input value={form.smtp_host} onChange={(e) => setForm((v) => ({ ...v, smtp_host: e.target.value }))} />
@@ -261,37 +297,49 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
                         <Label>SMTP port</Label>
                         <Input type="number" value={form.smtp_port} onChange={(e) => setForm((v) => ({ ...v, smtp_port: +e.target.value }))} />
                       </div>
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>SMTP username</Label>
-                      <Input value={form.smtp_username} onChange={(e) => setForm((v) => ({ ...v, smtp_username: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>New SMTP password (optional)</Label>
-                      <div className="relative">
-                        <Input
-                          type={showSmtpPassword ? "text" : "password"}
-                          value={form.smtp_password}
-                          onChange={(e) => setForm((v) => ({ ...v, smtp_password: e.target.value }))}
-                          className="pr-10"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowSmtpPassword(v => !v)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                          aria-label={showSmtpPassword ? "Hide SMTP password" : "Show SMTP password"}
-                        >
-                          {showSmtpPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                        </button>
+                      <div className="space-y-1.5 sm:col-span-2">
+                        <Label>New mailbox password (optional)</Label>
+                        <p className="text-[11px] text-muted-foreground -mt-0.5 mb-1">
+                          Applies to both IMAP and SMTP. Leave blank to keep the current password.
+                        </p>
+                        <div className="relative">
+                          <Input
+                            type={showMailboxPassword ? "text" : "password"}
+                            value={form.mailbox_password}
+                            onChange={(e) => setForm((v) => ({ ...v, mailbox_password: e.target.value }))}
+                            className="pr-10"
+                            autoComplete="new-password"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowMailboxPassword((v) => !v)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                            aria-label={showMailboxPassword ? "Hide password" : "Show password"}
+                          >
+                            {showMailboxPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex items-center justify-between rounded-md border p-3">
-                      <Label>Use TLS for IMAP</Label>
-                      <Switch checked={form.imap_use_tls} onCheckedChange={(v) => setForm((x) => ({ ...x, imap_use_tls: v }))} />
-                    </div>
-                    <div className="flex items-center justify-between rounded-md border p-3">
-                      <Label>Use TLS for SMTP</Label>
-                      <Switch checked={form.smtp_use_tls} onCheckedChange={(v) => setForm((x) => ({ ...x, smtp_use_tls: v }))} />
+                      <div className="sm:col-span-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-md border p-3">
+                        <div>
+                          <Label className="text-sm">Use SSL/TLS for IMAP</Label>
+                          <p className="text-[11px] text-muted-foreground">On for port 993. Off for 143 (STARTTLS).</p>
+                        </div>
+                        <Switch
+                          checked={form.imap_use_tls}
+                          onCheckedChange={(v) => setForm((x) => ({ ...x, imap_use_tls: v, imap_port: v ? 993 : 143 }))}
+                        />
+                      </div>
+                      <div className="sm:col-span-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-md border p-3">
+                        <div>
+                          <Label className="text-sm">Use SSL/TLS for SMTP</Label>
+                          <p className="text-[11px] text-muted-foreground">On for port 465. Off for 587 (STARTTLS).</p>
+                        </div>
+                        <Switch
+                          checked={form.smtp_use_tls}
+                          onCheckedChange={(v) => setForm((x) => ({ ...x, smtp_use_tls: v, smtp_port: v ? 465 : 587 }))}
+                        />
+                      </div>
                     </div>
                   </>
                 ) : (
@@ -299,7 +347,12 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
                 )}
               </TabsContent>
               <TabsContent value="sync" className="space-y-3 m-0">
-                <p className="text-sm text-muted-foreground">Manage mailbox sync and account lifecycle actions.</p>
+                {account.provider_type === "imap" && account.last_sync_error ? (
+                  <Alert variant="destructive" className="py-2">
+                    <AlertTitle className="text-sm">Last sync error</AlertTitle>
+                    <AlertDescription className="text-xs break-words">{account.last_sync_error}</AlertDescription>
+                  </Alert>
+                ) : null}
                 <Button onClick={syncNow} disabled={syncing} className="w-full gap-2">
                   {syncing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                   {syncing ? "Syncing..." : "Sync now"}

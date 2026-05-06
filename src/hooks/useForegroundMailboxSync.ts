@@ -2,9 +2,11 @@ import { useEffect, useRef, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import type { EmailAccountRow } from "@/lib/inbox-data";
+import { parseEdgeFunctionFailure } from "@/lib/edge-function-error";
 
 const POLL_MS_VISIBLE = 22_000;
 const MIN_GAP_MS = 10_000;
+const IMAP_FAIL_BACKOFF_MS = 3 * 60_000;
 
 /**
  * While the app tab is visible, periodically invokes provider sync so new mail
@@ -18,6 +20,7 @@ export function useForegroundMailboxSync(
   const queryClient = useQueryClient();
   const lastRunRef = useRef(0);
   const accountsRef = useRef(accounts);
+  const imapNextAllowedRef = useRef<Record<string, number>>({});
   accountsRef.current = accounts;
 
   const runSync = useCallback(async () => {
@@ -40,13 +43,21 @@ export function useForegroundMailboxSync(
             });
             if (error) throw error;
           } else if (acc.provider_type === "imap") {
-            const { error } = await supabase.functions.invoke("imap-sync", {
+            const notBefore = imapNextAllowedRef.current[acc.id] ?? 0;
+            if (Date.now() < notBefore) return;
+            const { data, error } = await supabase.functions.invoke("imap-sync", {
               body: { account_id: acc.id, max_messages: 80 },
             });
-            if (error) throw error;
+            if (error || (data && typeof data === "object" && (data as { ok?: boolean }).ok === false)) {
+              const detail = parseEdgeFunctionFailure(data, error);
+              console.warn(`[imap-sync] ${acc.email_address}:`, detail);
+              imapNextAllowedRef.current[acc.id] = Date.now() + IMAP_FAIL_BACKOFF_MS;
+            } else {
+              delete imapNextAllowedRef.current[acc.id];
+            }
           }
         } catch {
-          /* surfaced via sync_status */
+          /* surfaced via sync_status / last_sync_error */
         }
       }),
     );

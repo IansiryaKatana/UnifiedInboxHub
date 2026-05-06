@@ -11,6 +11,20 @@ import { supabase } from "@/integrations/supabase/client";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { runGmailSyncInChunks } from "@/lib/gmailSyncChunks";
 import { Progress } from "@/components/ui/progress";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  getMailProviderPreset,
+  MAIL_PRESET_CUSTOM,
+  MAIL_PRESET_NONE,
+  MAIL_PROVIDER_PRESETS,
+} from "@/lib/mail-provider-presets";
+import { parseEdgeFunctionFailure } from "@/lib/edge-function-error";
 
 interface Props {
   open: boolean;
@@ -32,20 +46,50 @@ const initialGmailFlow = () => ({
   connectedEmail: undefined as string | undefined,
 });
 
+const defaultImapState = () => ({
+  email_address: "",
+  display_name: "",
+  imap_host: "",
+  imap_port: 993,
+  imap_password: "",
+  smtp_host: "",
+  smtp_port: 465,
+  imap_use_tls: true,
+  smtp_use_tls: true,
+});
+
 export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) {
   const isMobile = useIsMobile();
   const [busy, setBusy] = useState(false);
   const [gmailFlow, setGmailFlow] = useState<ReturnType<typeof initialGmailFlow>>(initialGmailFlow);
   const popupRef = useRef<Window | null>(null);
   const popupWatchRef = useRef<number | null>(null);
-  const [imap, setImap] = useState({
-    email_address: "", display_name: "",
-    imap_host: "", imap_port: 993, imap_username: "", imap_password: "",
-    smtp_host: "", smtp_port: 465, smtp_username: "", smtp_password: "",
-    imap_use_tls: true, smtp_use_tls: true,
-  });
-  const [showImapPassword, setShowImapPassword] = useState(false);
-  const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+  const [imap, setImap] = useState(defaultImapState);
+  const [imapMailProvider, setImapMailProvider] = useState<string>(MAIL_PRESET_NONE);
+  const [showMailboxPassword, setShowMailboxPassword] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setImap(defaultImapState());
+    setImapMailProvider(MAIL_PRESET_NONE);
+    setShowMailboxPassword(false);
+  }, [open]);
+
+  const applyMailProviderPreset = (id: string) => {
+    setImapMailProvider(id);
+    if (id === MAIL_PRESET_NONE || id === MAIL_PRESET_CUSTOM) return;
+    const preset = getMailProviderPreset(id);
+    if (!preset) return;
+    setImap((prev) => ({
+      ...prev,
+      imap_host: preset.imap_host,
+      imap_port: preset.imap_port,
+      imap_use_tls: preset.imap_use_tls,
+      smtp_host: preset.smtp_host,
+      smtp_port: preset.smtp_port,
+      smtp_use_tls: preset.smtp_use_tls,
+    }));
+  };
 
   const connectGmail = async () => {
     setBusy(true);
@@ -252,31 +296,40 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
   }, [gmailFlow.status]);
 
   const addImap = async () => {
-    if (!imap.email_address || !imap.imap_host || !imap.imap_password || !imap.smtp_host) {
-      toast.error("Fill all required fields");
+    const email = imap.email_address.trim();
+    if (!email || !imap.imap_host?.trim() || !imap.imap_password?.trim() || !imap.smtp_host?.trim()) {
+      toast.error("Fill email, password, and server fields (or pick a mail provider)");
       return;
     }
     setBusy(true);
+    const pwd = imap.imap_password.trim();
     const trimmed = {
       ...imap,
-      email_address: imap.email_address.trim(),
+      email_address: email,
       imap_host: imap.imap_host.trim(),
-      imap_username: (imap.imap_username || imap.email_address).trim(),
+      imap_password: pwd,
       smtp_host: imap.smtp_host.trim(),
-      smtp_username: (imap.smtp_username || imap.imap_username || imap.email_address).trim(),
+      imap_username: email,
+      smtp_username: email,
+      smtp_password: pwd,
     };
     const { data, error } = await supabase.functions.invoke("account-credentials", {
       body: trimmed,
     });
     setBusy(false);
     if (error || !data?.ok) {
-      toast.error(error?.message ?? data?.error ?? "Failed to add account");
+      toast.error(parseEdgeFunctionFailure(data, error));
       return;
     }
     toast.success("Account added. Fetching mail…");
     onAccountAdded();
     onOpenChange(false);
-    await supabase.functions.invoke("imap-sync", { body: { account_id: data.account_id } });
+    const syncRes = await supabase.functions.invoke("imap-sync", {
+      body: { account_id: data.account_id, max_messages: 250 },
+    });
+    if (syncRes.error || !syncRes.data?.ok) {
+      toast.error(parseEdgeFunctionFailure(syncRes.data, syncRes.error));
+    }
     onAccountAdded();
   };
 
@@ -372,12 +425,38 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
           </TabsContent>
 
           <TabsContent value="imap" className="space-y-3 pt-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5 col-span-2">
+            <p className="text-sm text-muted-foreground">
+              Choose your mail provider to fill server names and ports, then enter your email and password. Usernames for
+              IMAP/SMTP match your email; the same password is used for both unless you edit the account later.
+            </p>
+            <div className="space-y-1.5">
+              <Label htmlFor="imap-mail-provider">Mail provider</Label>
+              <Select value={imapMailProvider} onValueChange={applyMailProviderPreset}>
+                <SelectTrigger id="imap-mail-provider" className="w-full">
+                  <SelectValue placeholder="Choose provider…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={MAIL_PRESET_NONE}>Let me enter servers manually</SelectItem>
+                  {MAIL_PROVIDER_PRESETS.map((p) => (
+                    <SelectItem key={p.id} value={p.id} title={p.hint}>
+                      {p.label}
+                    </SelectItem>
+                  ))}
+                  <SelectItem value={MAIL_PRESET_CUSTOM}>Other — keep current fields, edit below</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5 sm:col-span-2">
                 <Label>Email address</Label>
-                <Input value={imap.email_address} onChange={e => setImap({ ...imap, email_address: e.target.value, imap_username: imap.imap_username || e.target.value, smtp_username: imap.smtp_username || e.target.value })} placeholder="info@yourdomain.com" />
+                <Input
+                  value={imap.email_address}
+                  onChange={(e) => setImap({ ...imap, email_address: e.target.value })}
+                  placeholder="info@yourdomain.com"
+                  autoComplete="email"
+                />
               </div>
-              <div className="space-y-1.5 col-span-2">
+              <div className="space-y-1.5 sm:col-span-2">
                 <Label>Display name (optional)</Label>
                 <Input value={imap.display_name} onChange={e => setImap({ ...imap, display_name: e.target.value })} placeholder="Info — Your Brand" />
               </div>
@@ -389,27 +468,27 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
                 <Label>IMAP port</Label>
                 <Input type="number" value={imap.imap_port} onChange={e => setImap({ ...imap, imap_port: +e.target.value })} />
               </div>
-              <div className="space-y-1.5 col-span-2">
-                <Label>IMAP username</Label>
-                <Input value={imap.imap_username} onChange={e => setImap({ ...imap, imap_username: e.target.value })} placeholder="usually your email" />
-              </div>
-              <div className="space-y-1.5 col-span-2">
-                <Label>Mailbox password</Label>
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label>Password</Label>
+                <p className="text-[11px] text-muted-foreground -mt-0.5 mb-1">
+                  Same password is sent for IMAP and SMTP login (your provider’s mailbox password).
+                </p>
                 <div className="relative">
                   <Input
-                    type={showImapPassword ? "text" : "password"}
+                    type={showMailboxPassword ? "text" : "password"}
                     value={imap.imap_password}
-                    onChange={e => setImap({ ...imap, imap_password: e.target.value, smtp_password: imap.smtp_password || e.target.value })}
+                    onChange={(e) => setImap({ ...imap, imap_password: e.target.value })}
                     placeholder="••••••••"
                     className="pr-10"
+                    autoComplete="current-password"
                   />
                   <button
                     type="button"
-                    onClick={() => setShowImapPassword(v => !v)}
+                    onClick={() => setShowMailboxPassword((v) => !v)}
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    aria-label={showImapPassword ? "Hide password" : "Show password"}
+                    aria-label={showMailboxPassword ? "Hide password" : "Show password"}
                   >
-                    {showImapPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                    {showMailboxPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                   </button>
                 </div>
               </div>
@@ -421,34 +500,14 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
                 <Label>SMTP port</Label>
                 <Input type="number" value={imap.smtp_port} onChange={e => setImap({ ...imap, smtp_port: +e.target.value })} />
               </div>
-              <div className="space-y-1.5 col-span-2">
-                <Label>SMTP password</Label>
-                <div className="relative">
-                  <Input
-                    type={showSmtpPassword ? "text" : "password"}
-                    value={imap.smtp_password}
-                    onChange={e => setImap({ ...imap, smtp_password: e.target.value })}
-                    placeholder="••••••••"
-                    className="pr-10"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowSmtpPassword(v => !v)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    aria-label={showSmtpPassword ? "Hide SMTP password" : "Show SMTP password"}
-                  >
-                    {showSmtpPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                  </button>
-                </div>
-              </div>
-              <div className="col-span-2 flex items-center justify-between rounded-md border p-3">
+              <div className="sm:col-span-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-md border p-3">
                 <div>
                   <Label className="text-sm">Use SSL/TLS for IMAP</Label>
                   <p className="text-[11px] text-muted-foreground">On for port 993 (recommended). Off for 143 (STARTTLS/plain).</p>
                 </div>
                 <Switch checked={imap.imap_use_tls} onCheckedChange={v => setImap({ ...imap, imap_use_tls: v, imap_port: v ? 993 : 143 })} />
               </div>
-              <div className="col-span-2 flex items-center justify-between rounded-md border p-3">
+              <div className="sm:col-span-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-md border p-3">
                 <div>
                   <Label className="text-sm">Use SSL/TLS for SMTP</Label>
                   <p className="text-[11px] text-muted-foreground">On for port 465. Off for 587 (STARTTLS).</p>
