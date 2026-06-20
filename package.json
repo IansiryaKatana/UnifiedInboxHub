@@ -96,5 +96,8 @@
     "vite-plugin-pwa": "^1.2.0",
     "vitest": "^3.2.4",
     "workbox-precaching": "^7.4.0"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
   }
 }

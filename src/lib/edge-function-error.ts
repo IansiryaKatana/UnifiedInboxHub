@@ -14,6 +14,7 @@ function errorFromJsonString(raw: string): string | null {
 }
 
 function extractFromData(data: unknown): string | null {
+  if (typeof data === "string") return errorFromJsonString(data);
   if (!data || typeof data !== "object") return null;
   const o = data as { error?: string; message?: string; ok?: boolean };
   if (typeof o.error === "string" && o.error.trim()) return o.error.trim();
@@ -26,11 +27,14 @@ function extractFromErrorContext(error: unknown): string | null {
   const e = error as Record<string, unknown>;
   const ctx = e.context;
   if (ctx && typeof ctx === "object") {
-    const body = (ctx as Record<string, unknown>).body;
+    const ctxObj = ctx as Record<string, unknown>;
+    const body = ctxObj.body;
     if (typeof body === "string") {
       const from = errorFromJsonString(body);
       if (from) return from;
     }
+    const fromBodyObj = extractFromData(body);
+    if (fromBodyObj) return fromBodyObj;
   }
   const details = e.details;
   if (typeof details === "string" && details.trim()) return details.trim();

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
@@ -77,7 +77,7 @@ const Index = () => {
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
         void queryClient.invalidateQueries({ queryKey: ["inbox-threads", user.id] });
-      }, 100);
+      }, 750);
     };
 
     const channel = supabase
@@ -91,6 +91,14 @@ const Index = () => {
         "postgres_changes",
         { event: "*", schema: "public", table: "email_threads", filter: `user_id=eq.${user.id}` },
         schedule,
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "email_accounts", filter: `user_id=eq.${user.id}` },
+        () => {
+          void queryClient.invalidateQueries({ queryKey: ["email-accounts", user.id] });
+          schedule();
+        },
       )
       .subscribe();
 
@@ -161,7 +169,17 @@ const Index = () => {
     [threads],
   );
 
-  useForegroundMailboxSync(user?.id, accounts, accountIdsKey);
+  const { runSync } = useForegroundMailboxSync(user?.id, accounts, accountIdsKey);
+  const prevAccountCountRef = useRef(0);
+
+  useEffect(() => {
+    if (!user?.id || accounts.length === 0) return;
+    if (accounts.length > prevAccountCountRef.current) {
+      void runSync({ force: true });
+    }
+    prevAccountCountRef.current = accounts.length;
+  }, [accounts.length, user?.id, runSync]);
+
   useAppUnreadBadge(totalUnread);
 
   const selectedThread = threads.find((t) => t.id === selectedThreadId);
@@ -277,7 +295,7 @@ const Index = () => {
         onOpenChange={setAddOpen}
         onAccountAdded={async () => {
           await queryClient.invalidateQueries({ queryKey: ["email-accounts", user?.id] });
-          await queryClient.invalidateQueries({ queryKey: ["inbox-threads", user?.id] });
+          await queryClient.refetchQueries({ queryKey: ["inbox-threads", user?.id] });
         }}
       />
       <ComposeDialog

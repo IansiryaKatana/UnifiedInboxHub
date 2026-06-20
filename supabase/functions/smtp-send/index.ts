@@ -9,6 +9,8 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+import { normalizeMailboxPassword } from "../_shared/mail-credentials.ts";
+
 function decryptPassword(encrypted: string): string {
   const key = Deno.env.get("IMAP_SECRET_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   try {
@@ -80,7 +82,7 @@ Deno.serve(async (req) => {
 
     const mimeAttachments = await resolveAttachmentsForMime(supabase, Array.isArray(rawAttachments) ? rawAttachments as AttachmentInput[] : []);
 
-    const password = decryptPassword(account.smtp_password_encrypted);
+    const password = normalizeMailboxPassword(decryptPassword(account.smtp_password_encrypted));
     const port = account.smtp_port ?? 465;
     const client = new SMTPClient({
       connection: {

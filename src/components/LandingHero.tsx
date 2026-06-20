@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { InstallAppButton } from "@/components/InstallAppBanner";
 
 export const LandingHero = () => {
   useEffect(() => {
@@ -39,7 +40,7 @@ export const LandingHero = () => {
             Secure, modular workspace that brings every inbox together. Consolidate email and messages
             into one calm surface—stay focused, stay organized.
           </p>
-          <div className="mt-5 md:mt-10">
+          <div className="mt-5 flex flex-wrap items-center gap-3 md:mt-10">
             <Button
               asChild
               size="lg"
@@ -47,6 +48,7 @@ export const LandingHero = () => {
             >
               <Link to="/auth">Get started</Link>
             </Button>
+            <InstallAppButton />
           </div>
         </div>
 

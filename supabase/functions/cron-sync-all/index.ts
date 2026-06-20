@@ -21,7 +21,7 @@ type SyncResult = {
 };
 
 const DEFAULT_BATCH_SIZE = 4;
-const DEFAULT_TIMEOUT_MS = 25_000;
+const DEFAULT_TIMEOUT_MS = 55_000;
 const MAX_BATCH_SIZE = 20;
 const MAX_TIMEOUT_MS = 120_000;
 
@@ -32,13 +32,107 @@ function readIntEnv(name: string, fallback: number, min: number, max: number): n
   return Math.max(min, Math.min(max, Math.trunc(parsed)));
 }
 
+type SyncPayload = {
+  ok?: boolean;
+  error?: string;
+  partial?: boolean;
+  resume_first_sync?: boolean;
+  imported?: number;
+  scanned?: number;
+  skipped?: boolean;
+  reason?: string;
+};
+
+async function invokeImapSyncChunked(
+  baseUrl: string,
+  serviceRoleKey: string,
+  acc: AccountRow,
+  timeoutMs: number,
+): Promise<SyncResult> {
+  const startedAt = Date.now();
+  const maxChunks = 6;
+  let resumeFirstSync = false;
+  let totalImported = 0;
+  let lastError: string | undefined;
+  let lastStatus = 200;
+
+  for (let chunk = 0; chunk < maxChunks; chunk++) {
+    const remainingMs = timeoutMs - (Date.now() - startedAt);
+    if (remainingMs < 5_000) break;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort("timeout"), remainingMs);
+    try {
+      const res = await fetch(`${baseUrl}/functions/v1/imap-sync`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${serviceRoleKey}`,
+          "x-internal-cron": "1",
+          "x-account-user-id": acc.user_id,
+        },
+        body: JSON.stringify({
+          account_id: acc.id,
+          max_messages: 25,
+          ...(resumeFirstSync ? { resume_first_sync: true } : {}),
+        }),
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      let payload: SyncPayload = {};
+      try {
+        payload = JSON.parse(text) as SyncPayload;
+      } catch { /* ignore */ }
+
+      lastStatus = res.status;
+      if (!res.ok || payload.ok === false) {
+        lastError = payload.error ?? text.slice(0, 300);
+        break;
+      }
+      if (payload.skipped) break;
+
+      totalImported += typeof payload.imported === "number" ? payload.imported : 0;
+      resumeFirstSync = Boolean(payload.resume_first_sync);
+      if (!payload.partial) break;
+    } catch (e) {
+      const timedOut = controller.signal.aborted;
+      return {
+        id: acc.id,
+        provider_type: acc.provider_type,
+        function_name: "imap-sync",
+        ok: false,
+        timeout: timedOut,
+        duration_ms: Date.now() - startedAt,
+        error: timedOut ? `Timed out after ${timeoutMs}ms` : String(e),
+      };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  return {
+    id: acc.id,
+    provider_type: acc.provider_type,
+    function_name: "imap-sync",
+    ok: !lastError,
+    status: lastStatus,
+    timeout: false,
+    duration_ms: Date.now() - startedAt,
+    error: lastError ?? (totalImported > 0 ? `imported=${totalImported}` : undefined),
+  };
+}
+
 async function invokeProviderSync(
   baseUrl: string,
   serviceRoleKey: string,
   acc: AccountRow,
   timeoutMs: number,
 ): Promise<SyncResult> {
-  const fn = acc.provider_type === "gmail" ? "gmail-sync" : "imap-sync";
+  if (acc.provider_type === "imap") {
+    return invokeImapSyncChunked(baseUrl, serviceRoleKey, acc, timeoutMs);
+  }
+
+  const fn = "gmail-sync";
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort("timeout"), timeoutMs);

@@ -1,133 +1,129 @@
-import { useCallback, useEffect, useState } from "react";
-import { X, Download, Share2 } from "lucide-react";
+import { useState } from "react";
+import { Download, Share2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { usePwaInstall } from "@/hooks/usePwaInstall";
 
-const DISMISS_KEY = "pwa_install_banner_dismissed";
-
-function isStandalonePwa(): boolean {
-  if (typeof window === "undefined") return true;
-  if (window.matchMedia("(display-mode: standalone)").matches) return true;
-  if (window.matchMedia("(display-mode: fullscreen)").matches) return true;
-  // iOS Safari home-screen Web App
-  // @ts-expect-error - non-standard
-  if (window.navigator.standalone === true) return true;
-  return false;
+function InstallInstructions({ showChromeInstall, isIOS }: { showChromeInstall: boolean; isIOS: boolean }) {
+  if (showChromeInstall) {
+    return (
+      <p className="text-muted-foreground text-xs leading-snug">
+        Add to your home screen for quicker access and notifications.
+      </p>
+    );
+  }
+  if (isIOS) {
+    return (
+      <p className="text-muted-foreground text-xs leading-snug">
+        Tap <strong className="text-foreground">Share</strong>{" "}
+        <span className="inline-flex align-middle opacity-80">□↑</span> then{" "}
+        <strong className="text-foreground">Add to Home Screen</strong>.
+      </p>
+    );
+  }
+  return (
+    <p className="text-muted-foreground text-xs leading-snug">
+      Open your browser menu and choose <strong className="text-foreground">Install app</strong> or{" "}
+      <strong className="text-foreground">Add to Home screen</strong>.
+    </p>
+  );
 }
 
-function isLikelyMobile(): boolean {
-  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-}
+/** Compact install prompt for the inbox sidebar. */
+export function InstallAppSidebar() {
+  const { showInstall, canPromptInstall, isIOS, runInstall, dismiss } = usePwaInstall();
 
-function isIOS(): boolean {
-  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-}
+  if (!showInstall) return null;
 
-/** Banner for installing the PWA on phones (Chrome uses beforeinstallprompt; iOS has no system prompt). */
-export function InstallAppBanner() {
-  const [deferred, setDeferred] = useState<BeforeInstallPromptEvent | null>(null);
-  const [dismissed, setDismissed] = useState(() => {
-    try {
-      return sessionStorage.getItem(DISMISS_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!window.isSecureContext && window.location.hostname !== "localhost") return;
-    if (isStandalonePwa()) return;
-
-    const onBip = (e: Event) => {
-      e.preventDefault();
-      setDeferred(e as BeforeInstallPromptEvent);
-      setVisible(true);
-    };
-    window.addEventListener("beforeinstallprompt", onBip);
-
-    if (isLikelyMobile()) setVisible(true);
-
-    return () => window.removeEventListener("beforeinstallprompt", onBip);
-  }, []);
-
-  const dismiss = useCallback(() => {
-    setVisible(false);
-    setDismissed(true);
-    try {
-      sessionStorage.setItem(DISMISS_KEY, "1");
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  const runInstall = async () => {
-    if (!deferred) return;
-    try {
-      await deferred.prompt();
-      await deferred.userChoice;
-    } catch {
-      /* user dismissed native prompt */
-    }
-    dismiss();
+  const handleInstall = async () => {
+    if (canPromptInstall) await runInstall();
   };
 
-  if (dismissed || !visible || isStandalonePwa()) return null;
-
-  const showChromeInstall = Boolean(deferred);
-
   return (
-    <div
-      className={cn(
-        "shrink-0 border-b border-border bg-muted/60 backdrop-blur-sm px-3 py-2.5 md:px-4",
-        "flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3",
-      )}
-      role="region"
-      aria-label="Install app"
-    >
-      <div className="flex gap-2 min-w-0 items-start">
-        {isIOS() ? (
-          <Share2 className="size-5 shrink-0 text-primary mt-0.5" aria-hidden />
+    <div className="shrink-0 border-t border-sidebar-border px-3 py-2.5" role="region" aria-label="Install app">
+      <div className="flex items-start gap-2">
+        {isIOS ? (
+          <Share2 className="size-4 shrink-0 text-primary mt-0.5" aria-hidden />
         ) : (
-          <Download className="size-5 shrink-0 text-primary mt-0.5" aria-hidden />
+          <Download className="size-4 shrink-0 text-primary mt-0.5" aria-hidden />
         )}
-        <div className="min-w-0 text-sm leading-snug">
-          <p className="font-medium text-foreground">Install Unified Inbox Hub</p>
-          {showChromeInstall ? (
-            <p className="text-muted-foreground text-xs mt-0.5">Add to your home screen for quicker access and notifications.</p>
-          ) : isIOS() ? (
-            <p className="text-muted-foreground text-xs mt-0.5">
-              Tap <strong className="text-foreground">Share</strong>
-              {" "}
-              <span className="inline-flex align-middle opacity-80">□↑</span>
-              {" "}
-              then <strong className="text-foreground">Add to Home Screen</strong>.
-            </p>
-          ) : (
-            <p className="text-muted-foreground text-xs mt-0.5">
-              Open your browser menu (<strong className="text-foreground">⋮</strong>
-              {" "}
-              or <strong className="text-foreground">⋮</strong> in the URL bar) and choose{" "}
-              <strong className="text-foreground">Install app</strong>
-              {" "}
-              or <strong className="text-foreground">Add to Home screen</strong>.
-            </p>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium text-sidebar-foreground">Install app</p>
+          <InstallInstructions showChromeInstall={canPromptInstall} isIOS={isIOS} />
+          {canPromptInstall && (
+            <Button
+              type="button"
+              size="sm"
+              className="mt-2 h-7 gap-1.5 text-xs"
+              onClick={() => void handleInstall()}
+            >
+              <Download className="size-3.5" />
+              Install
+            </Button>
           )}
         </div>
-      </div>
-      <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
-        {showChromeInstall && (
-          <Button type="button" size="sm" onClick={() => void runInstall()} className="gap-1.5">
-            <Download className="size-4" />
-            Install
-          </Button>
-        )}
-        <Button type="button" variant="ghost" size="icon" className="size-8" onClick={dismiss} aria-label="Dismiss">
-          <X className="size-4" />
-        </Button>
+        <button
+          type="button"
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+          onClick={dismiss}
+          aria-label="Dismiss install prompt"
+        >
+          <X className="size-3.5" />
+        </button>
       </div>
     </div>
+  );
+}
+
+/** Install button for the landing page (opens instructions dialog when native prompt is unavailable). */
+export function InstallAppButton() {
+  const { showInstall, canPromptInstall, isIOS, runInstall } = usePwaInstall();
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  if (!showInstall) return null;
+
+  const handleClick = async () => {
+    if (canPromptInstall) {
+      await runInstall();
+      return;
+    }
+    setDialogOpen(true);
+  };
+
+  return (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        size="lg"
+        className="h-11 rounded-md border-neutral-300 bg-white px-7 text-[14px] font-medium text-neutral-950 shadow-none hover:bg-neutral-50 md:h-12 md:px-8 md:text-[15px]"
+        onClick={() => void handleClick()}
+      >
+        <Download className="size-4 mr-2" />
+        Install app
+      </Button>
+
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Install Unified Inbox Hub</DialogTitle>
+            <DialogDescription asChild>
+              <div className="pt-1">
+                <InstallInstructions showChromeInstall={false} isIOS={isIOS} />
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <Button type="button" className="w-full" onClick={() => setDialogOpen(false)}>
+            Got it
+          </Button>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

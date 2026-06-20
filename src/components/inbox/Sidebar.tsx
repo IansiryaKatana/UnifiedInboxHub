@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
-import { Inbox, Send, Star, Archive, Trash2, FileEdit, Plus, LogOut, Menu, Settings, Bell, AlertCircle, BookUser } from "lucide-react";
+import { Inbox, Send, Star, Archive, Trash2, FileEdit, Plus, LogOut, Menu, Settings, Bell, AlertCircle, BookUser, ChevronDown } from "lucide-react";
+import { InstallAppSidebar } from "@/components/InstallAppBanner";
 import { useOutboxCount } from "@/hooks/useOutboxCount";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -70,6 +71,7 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
   const outboxCount = useOutboxCount();
   const [editAccount, setEditAccount] = useState<Account | null>(null);
   const [profileDisplayName, setProfileDisplayName] = useState<string | null>(null);
+  const [accountsOpen, setAccountsOpen] = useState(true);
   const displayLabel = (value: string) => (value ? value[0].toUpperCase() + value.slice(1) : value);
 
   useEffect(() => {
@@ -145,7 +147,7 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
         )}
       </div>
 
-      <nav className="px-2 space-y-0.5">
+      <nav className="flex-1 min-h-0 overflow-y-auto px-2 space-y-0.5">
         {navItems.map(item => {
           const Icon = item.icon;
           const active = activeNav === item.id;
@@ -172,71 +174,101 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
         })}
       </nav>
 
-      <div className="mt-6 px-3">
-        <div className="flex items-center justify-between mb-2 px-1">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Accounts</h3>
-          <button
-            onClick={onAddAccount}
-            className="text-muted-foreground hover:text-foreground"
-            aria-label="Add account"
-          >
-            <Plus className="size-3.5" />
-          </button>
-        </div>
-        <div className="space-y-0.5">
-          <button
-            onClick={() => onSelectAccount(null)}
-            className={cn(
-              "w-full flex items-center justify-between px-2 py-1.5 rounded-md text-sm transition-colors",
-              selectedAccountId === null
-                ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
-                : "text-sidebar-foreground hover:bg-sidebar-accent/50"
-            )}
-          >
-            <span>All inboxes</span>
-            {totalUnread > 0 && <span className="text-xs text-muted-foreground">{totalUnread}</span>}
-          </button>
-          {accounts.map(acc => (
+      <div className="mt-auto shrink-0 flex flex-col">
+        <InstallAppSidebar />
+
+        <div className="border-t border-sidebar-border">
+          <div className="px-3 py-2">
+            <div className="flex items-center justify-between mb-1 px-1">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Accounts</h3>
+              <button
+                type="button"
+                onClick={onAddAccount}
+                className="text-muted-foreground hover:text-foreground"
+                aria-label="Add account"
+              >
+                <Plus className="size-3.5" />
+              </button>
+            </div>
             <div
-              key={acc.id}
               className={cn(
-                "w-full flex items-center justify-between px-2 py-1.5 rounded-md text-sm transition-colors group",
-                selectedAccountId === acc.id
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                "w-full flex items-center rounded-md text-sm transition-colors",
+                selectedAccountId === null
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                  : "text-sidebar-foreground"
               )}
             >
               <button
-                onClick={() => onSelectAccount(acc.id)}
-                className="flex items-center gap-2 min-w-0 flex-1 text-left"
-                title={acc.sync_status === "error" && acc.last_sync_error ? acc.last_sync_error : undefined}
+                type="button"
+                onClick={() => setAccountsOpen((v) => !v)}
+                className="shrink-0 p-1.5 pl-2 text-muted-foreground hover:text-foreground"
+                aria-expanded={accountsOpen}
+                aria-label={accountsOpen ? "Collapse accounts" : "Expand accounts"}
               >
-                <span className="size-2 rounded-full shrink-0" style={{ backgroundColor: acc.color }} />
-                <span className="truncate">{displayLabel(acc.email_address)}</span>
-                {acc.sync_status === "error" && (
-                  <AlertCircle className="size-3.5 shrink-0 text-amber-600" aria-hidden />
-                )}
+                <ChevronDown
+                  className={cn("size-3.5 transition-transform", !accountsOpen && "-rotate-90")}
+                  aria-hidden
+                />
               </button>
-              <div className="flex items-center gap-1 shrink-0">
-                {(unreadByAccount[acc.id] ?? 0) > 0 && (
-                  <span className="text-xs text-muted-foreground">{unreadByAccount[acc.id]}</span>
+              <button
+                type="button"
+                onClick={() => onSelectAccount(null)}
+                className={cn(
+                  "flex flex-1 items-center justify-between py-1.5 pr-2 min-w-0 text-left",
+                  selectedAccountId !== null && "hover:bg-sidebar-accent/50 rounded-r-md"
                 )}
-                <button
-                  onClick={() => setEditAccount(acc)}
-                  className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity"
-                  aria-label="Edit account"
-                  title="Edit account"
-                >
-                  <Settings className="size-3.5" />
-                </button>
-              </div>
+              >
+                <span>All inboxes</span>
+                {totalUnread > 0 && <span className="text-xs text-muted-foreground">{totalUnread}</span>}
+              </button>
             </div>
-          ))}
-          {accounts.length === 0 && (
-            <p className="text-xs text-muted-foreground px-2 py-2">No accounts yet</p>
-          )}
+            {accountsOpen && (
+              <div className="space-y-0.5 mt-0.5">
+                {accounts.map(acc => (
+                  <div
+                    key={acc.id}
+                    className={cn(
+                      "w-full flex items-center justify-between px-2 py-1.5 rounded-md text-sm transition-colors group",
+                      selectedAccountId === acc.id
+                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                        : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                    )}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => onSelectAccount(acc.id)}
+                      className="flex items-center gap-2 min-w-0 flex-1 text-left"
+                      title={acc.sync_status === "error" && acc.last_sync_error ? acc.last_sync_error : undefined}
+                    >
+                      <span className="size-2 rounded-full shrink-0" style={{ backgroundColor: acc.color }} />
+                      <span className="truncate">{displayLabel(acc.email_address)}</span>
+                      {acc.sync_status === "error" && (
+                        <AlertCircle className="size-3.5 shrink-0 text-amber-600" aria-hidden />
+                      )}
+                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {(unreadByAccount[acc.id] ?? 0) > 0 && (
+                        <span className="text-xs text-muted-foreground">{unreadByAccount[acc.id]}</span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setEditAccount(acc)}
+                        className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity"
+                        aria-label="Edit account"
+                        title="Edit account"
+                      >
+                        <Settings className="size-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {accounts.length === 0 && (
+                  <p className="text-xs text-muted-foreground px-2 py-2">No accounts yet</p>
+                )}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
 
       {push.supported && (
         <div className="px-3 py-2 border-t border-sidebar-border">
@@ -267,40 +299,41 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
         </div>
       )}
 
-      <div className="mt-auto p-3 border-t border-sidebar-border">
-        <div className="flex items-center gap-2 px-2 py-2">
-          <div className="size-8 rounded-full bg-primary/10 grid place-items-center text-xs font-semibold text-primary">
-            {avatarInitial}
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-xs font-medium truncate" title={showEmailUnderName ? userEmail : undefined}>
-              {sidebarTitle}
-            </p>
-            {showEmailUnderName && (
-              <p className="text-[10px] text-muted-foreground truncate" title={userEmail}>
-                {userEmail}
+        <div className="p-3 border-t border-sidebar-border">
+          <div className="flex items-center gap-2 px-2 py-2">
+            <div className="size-8 rounded-full bg-primary/10 grid place-items-center text-xs font-semibold text-primary">
+              {avatarInitial}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium truncate" title={showEmailUnderName ? userEmail : undefined}>
+                {sidebarTitle}
               </p>
-            )}
+              {showEmailUnderName && (
+                <p className="text-[10px] text-muted-foreground truncate" title={userEmail}>
+                  {userEmail}
+                </p>
+              )}
+            </div>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <button type="button" className="text-muted-foreground hover:text-foreground" aria-label="Sign out">
+                  <LogOut className="size-4" />
+                </button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Sign out?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    You will be logged out of Unified Inbox Hub on this device.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={signOut}>Sign out</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <button className="text-muted-foreground hover:text-foreground" aria-label="Sign out">
-                <LogOut className="size-4" />
-              </button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Sign out?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  You will be logged out of Unified Inbox Hub on this device.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={signOut}>Sign out</AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
         </div>
       </div>
     </div>

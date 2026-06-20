@@ -5,19 +5,26 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Mail, Server, Loader2, Eye, EyeOff, CircleCheckBig, AlertCircle } from "lucide-react";
+import { Mail, AtSign, Loader2, Eye, EyeOff, CircleCheckBig, AlertCircle, ShieldCheck, ChevronDown, Check, ChevronsUpDown } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { AppPasswordSetupAlert } from "@/components/inbox/AppPasswordSetupAlert";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { runGmailSyncInChunks } from "@/lib/gmailSyncChunks";
+import { runImapSyncInChunks } from "@/lib/imapSyncChunks";
 import { Progress } from "@/components/ui/progress";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   getMailProviderPreset,
   MAIL_PRESET_CUSTOM,
@@ -25,6 +32,7 @@ import {
   MAIL_PROVIDER_PRESETS,
 } from "@/lib/mail-provider-presets";
 import { parseEdgeFunctionFailure } from "@/lib/edge-function-error";
+import { normalizeMailboxPassword } from "@/lib/mail-credentials";
 
 interface Props {
   open: boolean;
@@ -46,6 +54,14 @@ const initialGmailFlow = () => ({
   connectedEmail: undefined as string | undefined,
 });
 
+const initialImapFlow = () => ({
+  status: "idle" as const,
+  message: "",
+  progress: 0,
+  imported: 0,
+  connectedEmail: undefined as string | undefined,
+});
+
 const defaultImapState = () => ({
   email_address: "",
   display_name: "",
@@ -58,26 +74,48 @@ const defaultImapState = () => ({
   smtp_use_tls: true,
 });
 
+function mailProviderLabel(id: string): string {
+  if (id === MAIL_PRESET_NONE) return "Choose a provider…";
+  if (id === MAIL_PRESET_CUSTOM) return "My provider isn't listed";
+  return getMailProviderPreset(id)?.label ?? "Choose a provider…";
+}
+
 export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) {
   const isMobile = useIsMobile();
   const [busy, setBusy] = useState(false);
   const [gmailFlow, setGmailFlow] = useState<ReturnType<typeof initialGmailFlow>>(initialGmailFlow);
+  const [imapFlow, setImapFlow] = useState<ReturnType<typeof initialImapFlow>>(initialImapFlow);
   const popupRef = useRef<Window | null>(null);
   const popupWatchRef = useRef<number | null>(null);
   const [imap, setImap] = useState(defaultImapState);
   const [imapMailProvider, setImapMailProvider] = useState<string>(MAIL_PRESET_NONE);
   const [showMailboxPassword, setShowMailboxPassword] = useState(false);
+  const [gmailGuideAcknowledged, setGmailGuideAcknowledged] = useState(false);
+  const [advancedServersOpen, setAdvancedServersOpen] = useState(false);
+  const [providerPickerOpen, setProviderPickerOpen] = useState(false);
+
+  const selectedProvider = getMailProviderPreset(imapMailProvider);
+  const appPasswordGuide = selectedProvider?.appPasswordGuide;
+  const showAdvancedServers = imapMailProvider === MAIL_PRESET_CUSTOM;
 
   useEffect(() => {
     if (!open) return;
     setImap(defaultImapState());
     setImapMailProvider(MAIL_PRESET_NONE);
     setShowMailboxPassword(false);
+    setGmailGuideAcknowledged(false);
+    setAdvancedServersOpen(false);
+    setProviderPickerOpen(false);
+    setImapFlow(initialImapFlow());
   }, [open]);
 
   const applyMailProviderPreset = (id: string) => {
     setImapMailProvider(id);
-    if (id === MAIL_PRESET_NONE || id === MAIL_PRESET_CUSTOM) return;
+    if (id === MAIL_PRESET_CUSTOM) {
+      setAdvancedServersOpen(true);
+      return;
+    }
+    if (id === MAIL_PRESET_NONE) return;
     const preset = getMailProviderPreset(id);
     if (!preset) return;
     setImap((prev) => ({
@@ -114,7 +152,7 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
     setGmailFlow({
       ...initialGmailFlow(),
       status: "waiting",
-      message: "Complete Google sign-in in the popup—your inbox stays open here.",
+      message: "Finish signing in in the popup. If Google shows a warning, tap Advanced, then Go to Unified Inbox Hub.",
       progress: 20,
       imported: 0,
       scanned: 0,
@@ -132,6 +170,18 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
     }, 450);
     return () => window.clearInterval(id);
   }, [gmailFlow.status]);
+
+  useEffect(() => {
+    if (imapFlow.status !== "syncing") return;
+    const id = window.setInterval(() => {
+      setImapFlow((prev) => {
+        if (prev.status !== "syncing") return prev;
+        const next = Math.min(92, prev.progress + 5);
+        return { ...prev, progress: next };
+      });
+    }, 450);
+    return () => window.clearInterval(id);
+  }, [imapFlow.status]);
 
   useEffect(() => {
     const onMessage = async (e: MessageEvent) => {
@@ -296,13 +346,33 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
   }, [gmailFlow.status]);
 
   const addImap = async () => {
-    const email = imap.email_address.trim();
-    if (!email || !imap.imap_host?.trim() || !imap.imap_password?.trim() || !imap.smtp_host?.trim()) {
-      toast.error("Fill email, password, and server fields (or pick a mail provider)");
+    const email = imap.email_address.trim().toLowerCase();
+    if (imapMailProvider === MAIL_PRESET_NONE) {
+      toast.error("Choose where your email is hosted (e.g. Outlook, Hostinger).");
+      return;
+    }
+    if (!email || !imap.imap_password?.trim()) {
+      toast.error("Enter your email address and password.");
+      return;
+    }
+    if (showAdvancedServers && (!imap.imap_host?.trim() || !imap.smtp_host?.trim())) {
+      toast.error("Enter incoming and outgoing server names, or pick your provider from the list.");
+      return;
+    }
+    if (!showAdvancedServers && !imap.imap_host?.trim()) {
+      toast.error("Could not load settings for that provider. Try again or choose “My provider isn't listed”.");
       return;
     }
     setBusy(true);
-    const pwd = imap.imap_password.trim();
+    setImapFlow({
+      ...initialImapFlow(),
+      status: "connecting",
+      message: "Saving your sign-in details…",
+      progress: 15,
+      connectedEmail: email,
+    });
+
+    const pwd = normalizeMailboxPassword(imap.imap_password);
     const trimmed = {
       ...imap,
       email_address: email,
@@ -316,27 +386,101 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
     const { data, error } = await supabase.functions.invoke("account-credentials", {
       body: trimmed,
     });
-    setBusy(false);
     if (error || !data?.ok) {
+      setBusy(false);
+      setImapFlow({
+        ...initialImapFlow(),
+        status: "error",
+        message: parseEdgeFunctionFailure(data, error),
+        progress: 100,
+        connectedEmail: email,
+      });
       toast.error(parseEdgeFunctionFailure(data, error));
       return;
     }
-    toast.success("Account added. Fetching mail…");
-    onAccountAdded();
-    onOpenChange(false);
-    const syncRes = await supabase.functions.invoke("imap-sync", {
-      body: { account_id: data.account_id, max_messages: 250 },
+
+    const accountId = data.account_id as string;
+    await onAccountAdded();
+
+    setImapFlow({
+      status: "syncing",
+      connectedEmail: email,
+      message: `Fetching mail for ${email}…`,
+      progress: 35,
+      imported: 0,
     });
-    if (syncRes.error || !syncRes.data?.ok) {
-      toast.error(parseEdgeFunctionFailure(syncRes.data, syncRes.error));
+
+    try {
+      const { count: baselineCount } = await supabase
+        .from("emails")
+        .select("id", { count: "exact", head: true })
+        .eq("account_id", accountId);
+
+      let chunkCount = 0;
+      const { imported: totalImported } = await runImapSyncInChunks(supabase, accountId, {
+        maxMessages: 25,
+        maxChunks: 12,
+        onProgress: async ({ totalImported: aggImported, hasMore }) => {
+          chunkCount += 1;
+          const { count: liveCount } = await supabase
+            .from("emails")
+            .select("id", { count: "exact", head: true })
+            .eq("account_id", accountId);
+          const importedLive = Math.max(aggImported, Math.max(0, (liveCount ?? 0) - (baselineCount ?? 0)));
+          setImapFlow((prev) => ({
+            ...prev,
+            status: "syncing",
+            progress: hasMore ? Math.min(95, 35 + chunkCount * 6) : 100,
+            imported: importedLive,
+            message: hasMore
+              ? `Fetching emails… ${importedLive} imported so far.`
+              : `Sync complete · ${importedLive} email${importedLive === 1 ? "" : "s"} imported.`,
+          }));
+          await onAccountAdded();
+        },
+      });
+
+      await onAccountAdded();
+      setImapFlow((prev) => ({
+        ...prev,
+        status: "success",
+        message:
+          totalImported > 0
+            ? `First sync finished · ${totalImported} message${totalImported === 1 ? "" : "s"} imported.`
+            : "Account connected · your inbox is ready.",
+        progress: 100,
+        imported: totalImported,
+      }));
+      toast.success(
+        totalImported > 0
+          ? `${email} connected · ${totalImported} messages imported.`
+          : `${email} connected.`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setImapFlow((prev) => ({
+        ...prev,
+        status: "error",
+        message: `Connected, but initial sync failed: ${msg}`,
+        progress: 100,
+      }));
+      toast.error(`Connected, but initial sync failed: ${msg}`);
+      await onAccountAdded();
+    } finally {
+      setBusy(false);
     }
-    onAccountAdded();
   };
 
   const handleSheetOpenChange = (next: boolean) => {
-    if (!next) setGmailFlow(initialGmailFlow());
+    if (!next) {
+      setGmailFlow(initialGmailFlow());
+      setImapFlow(initialImapFlow());
+    }
     onOpenChange(next);
   };
+
+  const imapFormLocked =
+    busy || imapFlow.status === "connecting" || imapFlow.status === "syncing";
 
   return (
     <Sheet open={open} onOpenChange={handleSheetOpenChange}>
@@ -346,23 +490,49 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
       >
         <SheetHeader>
           <SheetTitle>Add an email account</SheetTitle>
-          <SheetDescription>Connect Gmail or a custom IMAP/SMTP mailbox.</SheetDescription>
+          <SheetDescription>Connect Gmail or sign in with your work or personal email.</SheetDescription>
         </SheetHeader>
 
         <Tabs defaultValue="gmail" className="mt-2">
           <TabsList className="grid grid-cols-2 w-full">
             <TabsTrigger value="gmail" className="gap-2"><Mail className="size-4" /> Gmail</TabsTrigger>
-            <TabsTrigger value="imap" className="gap-2"><Server className="size-4" /> IMAP / SMTP</TabsTrigger>
+            <TabsTrigger value="imap" className="gap-2"><AtSign className="size-4" /> Other email</TabsTrigger>
           </TabsList>
 
           <TabsContent value="gmail" className="space-y-4 pt-4">
             <p className="text-sm text-muted-foreground">
-              Sign in with Google in the popup—this app stays open. You can connect multiple Gmail accounts.
+              We&apos;ll open Google in a small window. This page stays open—you can add more than one Gmail account.
             </p>
-            <Button onClick={connectGmail} disabled={busy || gmailFlow.status === "waiting" || gmailFlow.status === "syncing"} className="w-full gap-2">
-              {busy ? <Loader2 className="size-4 animate-spin" /> : <Mail className="size-4" />}
-              Connect Gmail
-            </Button>
+
+            <Alert className="border-blue-500/25 bg-blue-500/[0.06] dark:bg-blue-950/20">
+              <ShieldCheck className="size-4 text-blue-600" aria-hidden />
+              <AlertTitle className="text-sm">Google might show a warning first</AlertTitle>
+              <AlertDescription className="text-xs text-muted-foreground space-y-2">
+                <p>That&apos;s normal for our team app. You only do this once per account.</p>
+                <p className="font-medium text-foreground">If the screen looks scary:</p>
+                <ol className="list-decimal list-inside space-y-0.5">
+                  <li>Tap or click <span className="font-medium text-foreground">Advanced</span> (bottom left)</li>
+                  <li>Then <span className="font-medium text-foreground">Go to Unified Inbox Hub</span></li>
+                  <li>Allow access when asked</li>
+                </ol>
+              </AlertDescription>
+            </Alert>
+
+            {!gmailGuideAcknowledged ? (
+              <Button
+                onClick={() => setGmailGuideAcknowledged(true)}
+                disabled={busy || gmailFlow.status === "waiting" || gmailFlow.status === "syncing"}
+                className="w-full gap-2"
+              >
+                <ShieldCheck className="size-4" />
+                Got it — continue
+              </Button>
+            ) : (
+              <Button onClick={connectGmail} disabled={busy || gmailFlow.status === "waiting" || gmailFlow.status === "syncing"} className="w-full gap-2">
+                {busy ? <Loader2 className="size-4 animate-spin" /> : <Mail className="size-4" />}
+                Sign in with Google
+              </Button>
+            )}
 
             {(gmailFlow.status === "waiting" || gmailFlow.status === "syncing") && (
               <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-2">
@@ -372,9 +542,13 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
                 <p className="text-xs text-muted-foreground">{gmailFlow.message}</p>
                 <Progress value={gmailFlow.progress} className="h-2" />
                 {gmailFlow.status === "waiting" && (
-                  <p className="text-[11px] text-muted-foreground">
-                    Finish authorization in the popup. Your account appears in the sidebar as soon as it connects.
-                  </p>
+                  <div className="text-[11px] text-muted-foreground space-y-1">
+                    <p>Finish signing in in the popup. Your account shows up in the sidebar when it&apos;s done.</p>
+                    <p>
+                      See a red warning? <span className="font-medium text-foreground">Advanced</span> →{" "}
+                      <span className="font-medium text-foreground">Go to Unified Inbox Hub</span>.
+                    </p>
+                  </div>
                 )}
               </div>
             )}
@@ -424,104 +598,303 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
             )}
           </TabsContent>
 
-          <TabsContent value="imap" className="space-y-3 pt-4">
+          <TabsContent value="imap" className="space-y-4 pt-4">
             <p className="text-sm text-muted-foreground">
-              Choose your mail provider to fill server names and ports, then enter your email and password. Usernames for
-              IMAP/SMTP match your email; the same password is used for both unless you edit the account later.
+              Pick who hosts your email, then sign in with the same address and password you use in Outlook, Apple Mail, or your phone.
             </p>
+
             <div className="space-y-1.5">
-              <Label htmlFor="imap-mail-provider">Mail provider</Label>
-              <Select value={imapMailProvider} onValueChange={applyMailProviderPreset}>
-                <SelectTrigger id="imap-mail-provider" className="w-full">
-                  <SelectValue placeholder="Choose provider…" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={MAIL_PRESET_NONE}>Let me enter servers manually</SelectItem>
-                  {MAIL_PROVIDER_PRESETS.map((p) => (
-                    <SelectItem key={p.id} value={p.id} title={p.hint}>
-                      {p.label}
-                    </SelectItem>
-                  ))}
-                  <SelectItem value={MAIL_PRESET_CUSTOM}>Other — keep current fields, edit below</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1.5 sm:col-span-2">
-                <Label>Email address</Label>
-                <Input
-                  value={imap.email_address}
-                  onChange={(e) => setImap({ ...imap, email_address: e.target.value })}
-                  placeholder="info@yourdomain.com"
-                  autoComplete="email"
-                />
-              </div>
-              <div className="space-y-1.5 sm:col-span-2">
-                <Label>Display name (optional)</Label>
-                <Input value={imap.display_name} onChange={e => setImap({ ...imap, display_name: e.target.value })} placeholder="Info — Your Brand" />
-              </div>
-              <div className="space-y-1.5">
-                <Label>IMAP host</Label>
-                <Input value={imap.imap_host} onChange={e => setImap({ ...imap, imap_host: e.target.value })} placeholder="imap.yourdomain.com" />
-              </div>
-              <div className="space-y-1.5">
-                <Label>IMAP port</Label>
-                <Input type="number" value={imap.imap_port} onChange={e => setImap({ ...imap, imap_port: +e.target.value })} />
-              </div>
-              <div className="space-y-1.5 sm:col-span-2">
-                <Label>Password</Label>
-                <p className="text-[11px] text-muted-foreground -mt-0.5 mb-1">
-                  Same password is sent for IMAP and SMTP login (your provider’s mailbox password).
-                </p>
-                <div className="relative">
-                  <Input
-                    type={showMailboxPassword ? "text" : "password"}
-                    value={imap.imap_password}
-                    onChange={(e) => setImap({ ...imap, imap_password: e.target.value })}
-                    placeholder="••••••••"
-                    className="pr-10"
-                    autoComplete="current-password"
-                  />
-                  <button
+              <Label htmlFor="imap-mail-provider" className="text-base font-medium">
+                Where is your email hosted?
+              </Label>
+              <Popover open={providerPickerOpen} onOpenChange={setProviderPickerOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    id="imap-mail-provider"
                     type="button"
-                    onClick={() => setShowMailboxPassword((v) => !v)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    aria-label={showMailboxPassword ? "Hide password" : "Show password"}
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={providerPickerOpen}
+                    disabled={imapFormLocked}
+                    className="w-full h-11 justify-between font-normal"
                   >
-                    {showMailboxPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                  </button>
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label>SMTP host</Label>
-                <Input value={imap.smtp_host} onChange={e => setImap({ ...imap, smtp_host: e.target.value })} placeholder="smtp.yourdomain.com" />
-              </div>
-              <div className="space-y-1.5">
-                <Label>SMTP port</Label>
-                <Input type="number" value={imap.smtp_port} onChange={e => setImap({ ...imap, smtp_port: +e.target.value })} />
-              </div>
-              <div className="sm:col-span-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-md border p-3">
-                <div>
-                  <Label className="text-sm">Use SSL/TLS for IMAP</Label>
-                  <p className="text-[11px] text-muted-foreground">On for port 993 (recommended). Off for 143 (STARTTLS/plain).</p>
-                </div>
-                <Switch checked={imap.imap_use_tls} onCheckedChange={v => setImap({ ...imap, imap_use_tls: v, imap_port: v ? 993 : 143 })} />
-              </div>
-              <div className="sm:col-span-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-md border p-3">
-                <div>
-                  <Label className="text-sm">Use SSL/TLS for SMTP</Label>
-                  <p className="text-[11px] text-muted-foreground">On for port 465. Off for 587 (STARTTLS).</p>
-                </div>
-                <Switch checked={imap.smtp_use_tls} onCheckedChange={v => setImap({ ...imap, smtp_use_tls: v, smtp_port: v ? 465 : 587 })} />
-              </div>
+                    <span className={cn("truncate", imapMailProvider === MAIL_PRESET_NONE && "text-muted-foreground")}>
+                      {mailProviderLabel(imapMailProvider)}
+                    </span>
+                    <ChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
+                  <Command>
+                    <CommandInput placeholder="Search providers…" />
+                    <CommandList>
+                      <CommandEmpty>No provider found.</CommandEmpty>
+                      <CommandGroup>
+                        {MAIL_PROVIDER_PRESETS.map((p) => (
+                          <CommandItem
+                            key={p.id}
+                            value={`${p.label} ${p.hint ?? ""}`}
+                            onSelect={() => {
+                              applyMailProviderPreset(p.id);
+                              setProviderPickerOpen(false);
+                            }}
+                          >
+                            <Check
+                              className={cn(
+                                "mr-2 size-4 shrink-0",
+                                imapMailProvider === p.id ? "opacity-100" : "opacity-0",
+                              )}
+                            />
+                            <div className="min-w-0">
+                              <p className="truncate">{p.label}</p>
+                              {p.hint ? <p className="text-xs text-muted-foreground truncate">{p.hint}</p> : null}
+                            </div>
+                          </CommandItem>
+                        ))}
+                        <CommandItem
+                          value="My provider isn't listed"
+                          onSelect={() => {
+                            applyMailProviderPreset(MAIL_PRESET_CUSTOM);
+                            setProviderPickerOpen(false);
+                          }}
+                        >
+                          <Check
+                            className={cn(
+                              "mr-2 size-4 shrink-0",
+                              imapMailProvider === MAIL_PRESET_CUSTOM ? "opacity-100" : "opacity-0",
+                            )}
+                          />
+                          My provider isn&apos;t listed
+                        </CommandItem>
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+              {selectedProvider?.hint ? (
+                <p className="text-xs text-muted-foreground">{selectedProvider.hint}</p>
+              ) : imapMailProvider !== MAIL_PRESET_NONE && !showAdvancedServers ? (
+                <p className="text-xs text-muted-foreground">We&apos;ll connect using {selectedProvider?.label}&apos;s usual settings.</p>
+              ) : null}
             </div>
-            <Button onClick={addImap} disabled={busy} className="w-full gap-2">
-              {busy && <Loader2 className="size-4 animate-spin" />}
-              Add account
-            </Button>
-            <p className="text-[11px] text-muted-foreground">
-              Credentials are encrypted server-side and only used to fetch and send mail on your behalf.
-            </p>
+
+            {imapMailProvider !== MAIL_PRESET_NONE && (
+              <div className="space-y-3">
+                {appPasswordGuide ? <AppPasswordSetupAlert guide={appPasswordGuide} /> : null}
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="imap-email">Email address</Label>
+                  <Input
+                    id="imap-email"
+                    value={imap.email_address}
+                    onChange={(e) => setImap({ ...imap, email_address: e.target.value })}
+                    placeholder={appPasswordGuide?.emailPlaceholder ?? "Hello@capitaldreamdubai.com"}
+                    autoComplete="email"
+                    disabled={imapFormLocked}
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="imap-password">
+                    {appPasswordGuide?.passwordFieldLabel ?? "Email password"}
+                  </Label>
+                  <div className="relative">
+                    <Input
+                      id="imap-password"
+                      type={showMailboxPassword ? "text" : "password"}
+                      value={imap.imap_password}
+                      onChange={(e) => setImap({ ...imap, imap_password: e.target.value })}
+                      placeholder={
+                        appPasswordGuide?.passwordPlaceholder ?? "Same password you use to check mail"
+                      }
+                      className="pr-10"
+                      autoComplete="current-password"
+                      disabled={imapFormLocked}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowMailboxPassword((v) => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                      aria-label={showMailboxPassword ? "Hide password" : "Show password"}
+                    >
+                      {showMailboxPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                    </button>
+                  </div>
+                  {appPasswordGuide ? (
+                    <p className="text-[11px] text-muted-foreground">{appPasswordGuide.passwordHint}</p>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">
+                      Usually the same password you use in your email app or webmail.
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="imap-display-name">Name on outgoing mail <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                  <Input
+                    id="imap-display-name"
+                    value={imap.display_name}
+                    onChange={(e) => setImap({ ...imap, display_name: e.target.value })}
+                    placeholder="Your name e.g. Disna Perera"
+                    disabled={imapFormLocked}
+                  />
+                </div>
+              </div>
+            )}
+
+            {showAdvancedServers && (
+              <Collapsible open={advancedServersOpen} onOpenChange={setAdvancedServersOpen}>
+                <CollapsibleTrigger asChild>
+                  <Button variant="ghost" size="sm" className="w-full justify-between px-2 h-9 text-muted-foreground">
+                    Server settings
+                    <ChevronDown className={`size-4 transition-transform ${advancedServersOpen ? "rotate-180" : ""}`} />
+                  </Button>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="space-y-3 pt-2">
+                  <p className="text-xs text-muted-foreground">
+                    Only fill these in if your IT team gave you specific server names.
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="imap-host">Incoming mail server</Label>
+                      <Input
+                        id="imap-host"
+                        value={imap.imap_host}
+                        onChange={(e) => setImap({ ...imap, imap_host: e.target.value })}
+                        placeholder="imap.example.com"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="imap-port">Incoming port</Label>
+                      <Input
+                        id="imap-port"
+                        type="number"
+                        value={imap.imap_port}
+                        onChange={(e) => setImap({ ...imap, imap_port: +e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="smtp-host">Outgoing mail server</Label>
+                      <Input
+                        id="smtp-host"
+                        value={imap.smtp_host}
+                        onChange={(e) => setImap({ ...imap, smtp_host: e.target.value })}
+                        placeholder="smtp.example.com"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="smtp-port">Outgoing port</Label>
+                      <Input
+                        id="smtp-port"
+                        type="number"
+                        value={imap.smtp_port}
+                        onChange={(e) => setImap({ ...imap, smtp_port: +e.target.value })}
+                      />
+                    </div>
+                    <div className="sm:col-span-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-md border p-3">
+                      <div>
+                        <Label className="text-sm">Secure incoming connection</Label>
+                        <p className="text-[11px] text-muted-foreground">Leave on unless IT told you otherwise.</p>
+                      </div>
+                      <Switch checked={imap.imap_use_tls} onCheckedChange={v => setImap({ ...imap, imap_use_tls: v, imap_port: v ? 993 : 143 })} />
+                    </div>
+                    <div className="sm:col-span-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-md border p-3">
+                      <div>
+                        <Label className="text-sm">Secure outgoing connection</Label>
+                        <p className="text-[11px] text-muted-foreground">Leave on unless IT told you otherwise.</p>
+                      </div>
+                      <Switch checked={imap.smtp_use_tls} onCheckedChange={v => setImap({ ...imap, smtp_use_tls: v, smtp_port: v ? 465 : 587 })} />
+                    </div>
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+            )}
+
+            {imapFlow.status === "idle" && (
+              <Button
+                onClick={addImap}
+                disabled={imapMailProvider === MAIL_PRESET_NONE}
+                className="w-full gap-2"
+              >
+                <AtSign className="size-4" />
+                Connect email
+              </Button>
+            )}
+
+            {(imapFlow.status === "connecting" || imapFlow.status === "syncing") && (
+              <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="size-4 animate-spin text-primary shrink-0" aria-hidden />
+                  <p className="text-sm font-medium">
+                    {imapFlow.status === "connecting" ? "Connecting account" : "Fetching your emails"}
+                  </p>
+                </div>
+                {imapFlow.connectedEmail ? (
+                  <p className="text-xs font-medium text-foreground truncate">{imapFlow.connectedEmail}</p>
+                ) : null}
+                <p className="text-xs text-muted-foreground">{imapFlow.message}</p>
+                <Progress value={imapFlow.progress} className="h-2" />
+                {imapFlow.status === "syncing" && imapFlow.imported > 0 ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    New messages appear in your inbox list as they arrive — no need to refresh the page.
+                  </p>
+                ) : imapFlow.status === "syncing" ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    This may take a minute for larger mailboxes. Your inbox updates automatically.
+                  </p>
+                ) : null}
+              </div>
+            )}
+
+            {imapFlow.status === "success" && (
+              <div className="rounded-lg border border-green-600/25 bg-green-500/[0.06] dark:bg-green-950/30 p-4 space-y-3">
+                <div className="flex items-start gap-3">
+                  <CircleCheckBig className="size-5 text-green-600 shrink-0 mt-0.5" aria-hidden />
+                  <div className="min-w-0 text-left space-y-1">
+                    <p className="text-sm font-semibold text-foreground">Email account connected</p>
+                    {imapFlow.connectedEmail ? (
+                      <p className="text-sm font-medium text-foreground truncate">{imapFlow.connectedEmail}</p>
+                    ) : null}
+                    <p className="text-xs text-muted-foreground">{imapFlow.message}</p>
+                    {imapFlow.imported > 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        Check the inbox list — {imapFlow.imported} message{imapFlow.imported === 1 ? "" : "s"} are already there.
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+                <Button
+                  className="w-full"
+                  onClick={() => {
+                    setImapFlow(initialImapFlow());
+                    onOpenChange(false);
+                  }}
+                >
+                  Done
+                </Button>
+              </div>
+            )}
+
+            {imapFlow.status === "error" && (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/[0.06] p-4 space-y-3">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="size-5 text-destructive shrink-0 mt-0.5" aria-hidden />
+                  <div className="min-w-0 text-left space-y-1">
+                    <p className="text-sm font-semibold">Could not finish setup</p>
+                    <p className="text-xs text-muted-foreground">{imapFlow.message}</p>
+                  </div>
+                </div>
+                <Button variant="outline" className="w-full" onClick={() => setImapFlow(initialImapFlow())}>
+                  Try again
+                </Button>
+              </div>
+            )}
+
+            {imapFlow.status === "idle" && (
+              <p className="text-[11px] text-muted-foreground text-center">
+                Your sign-in details are encrypted and only used to sync your inbox.
+              </p>
+            )}
           </TabsContent>
         </Tabs>
       </SheetContent>

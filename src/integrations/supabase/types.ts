@@ -366,7 +366,10 @@ export type Database = {
     }
     Functions: {
       get_inbox_threads_enriched: {
-        Args: Record<PropertyKey, never>
+        Args: {
+          p_limit?: number
+          p_offset?: number
+        }
         Returns: {
           result: Json
         }[]

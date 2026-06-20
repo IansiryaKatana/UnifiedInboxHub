@@ -52,6 +52,9 @@ export default function Auth() {
     setLoading(false);
     if (error) {
       toast.error(error.message);
+    } else if (data.user && (data.user.identities?.length ?? 0) === 0) {
+      // Supabase can return an obfuscated "already exists" response with no identities.
+      toast.error("This email is already registered. Sign in or reset your password instead.");
     } else if (data.session) {
       toast.success("Account created — you're signed in.");
       navigate("/");

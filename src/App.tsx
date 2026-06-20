@@ -6,7 +6,6 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { AuthProvider } from "@/hooks/useAuth";
-import { InstallAppBanner } from "@/components/InstallAppBanner.tsx";
 import { OutboxProcessor } from "@/components/OutboxProcessor";
 import Index from "./pages/Index.tsx";
 import Auth from "./pages/Auth.tsx";
@@ -31,7 +30,6 @@ const queryClient = new QueryClient({
 function AppShell() {
   return (
     <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-background">
-      <InstallAppBanner />
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <Outlet />
       </div>
@@ -61,7 +59,12 @@ const App = () => (
     <TooltipProvider>
       <Toaster />
       <Sonner />
-      <BrowserRouter>
+      <BrowserRouter
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
         <AuthProvider>
           <OutboxProcessor />
           <Sentry.ErrorBoundary

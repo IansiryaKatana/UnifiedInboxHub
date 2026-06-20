@@ -275,6 +275,7 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   let accountIdForError: string | undefined;
+  let supabaseForCleanup: ReturnType<typeof createClient> | null = null;
 
   try {
     const authHeader = req.headers.get("Authorization");
@@ -285,6 +286,7 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
       { global: { headers: { Authorization: authHeader } } },
     );
+    supabaseForCleanup = supabase;
 
     let userId: string | null = null;
     if (req.headers.get("x-internal-cron") === "1") {
@@ -321,6 +323,16 @@ Deno.serve(async (req) => {
     if (accErr || !account) return new Response(JSON.stringify({ error: "Account not found" }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     if (account.provider_type !== "gmail") return new Response(JSON.stringify({ error: "Not a Gmail account" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
+    const STALE_SYNC_MS = 3 * 60 * 1000;
+    if (account.sync_status === "syncing" && account.updated_at) {
+      const age = Date.now() - new Date(account.updated_at).getTime();
+      if (age < STALE_SYNC_MS) {
+        return new Response(JSON.stringify({ ok: true, imported: 0, skipped: true, reason: "sync_in_progress" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
     await supabase.from("email_accounts").update({ sync_status: "syncing", last_sync_error: null }).eq("id", accountId);
 
     const accessToken = await getValidAccessToken(supabase, account);
@@ -330,7 +342,7 @@ Deno.serve(async (req) => {
     let scanned = 0;
 
     // Hard cap Gmail `messages.get` calls per invocation (attachments + body); avoids HTTP 546 on heavy mail.
-    const maxFullFetches = Math.max(5, Math.min(Number(body.max_full_fetches) || 22, 40));
+    const maxFullFetches = Math.max(3, Math.min(Number(body.max_full_fetches) || 10, 25));
     const fetchBudget = { remaining: maxFullFetches };
 
     // Optional: tiny recent catch-up (off by default — was causing timeouts combined with inbox pass).
@@ -338,8 +350,8 @@ Deno.serve(async (req) => {
       body.recent_catchup === true && !startPageToken && maxPages === 1;
     if (recentCatchup) {
       const recentUrl = new URL(`${GMAIL_API}/users/me/messages`);
-      recentUrl.searchParams.set("maxResults", "8");
-      recentUrl.searchParams.set("q", "newer_than:7d");
+      recentUrl.searchParams.set("maxResults", "12");
+      recentUrl.searchParams.set("q", "newer_than:2d");
       const recentRes = await fetch(recentUrl.toString(), { headers: gHeaders });
       if (recentRes.ok) {
         const recentData = await recentRes.json();
@@ -431,5 +443,17 @@ Deno.serve(async (req) => {
       /* ignore */
     }
     return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  } finally {
+    if (accountIdForError && supabaseForCleanup) {
+      try {
+        await supabaseForCleanup
+          .from("email_accounts")
+          .update({ sync_status: "idle" })
+          .eq("id", accountIdForError)
+          .eq("sync_status", "syncing");
+      } catch {
+        /* ignore */
+      }
+    }
   }
 });

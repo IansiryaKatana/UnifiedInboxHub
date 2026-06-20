@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { normalizeMailboxPassword } from "../_shared/mail-credentials.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -78,13 +79,14 @@ Deno.serve(async (req) => {
       if (typeof body.smtp_port === "number" && Number.isFinite(body.smtp_port)) updates.smtp_port = body.smtp_port;
       if (typeof body.smtp_username === "string" && body.smtp_username.trim()) updates.smtp_username = body.smtp_username.trim();
       if (typeof body.imap_password === "string" && body.imap_password.length > 0) {
-        updates.imap_password_encrypted = encryptPassword(body.imap_password);
+        const normalized = normalizeMailboxPassword(body.imap_password);
+        updates.imap_password_encrypted = encryptPassword(normalized);
         if (typeof body.smtp_password !== "string" || body.smtp_password.length === 0) {
-          updates.smtp_password_encrypted = encryptPassword(body.imap_password);
+          updates.smtp_password_encrypted = encryptPassword(normalized);
         }
       }
       if (typeof body.smtp_password === "string" && body.smtp_password.length > 0) {
-        updates.smtp_password_encrypted = encryptPassword(body.smtp_password);
+        updates.smtp_password_encrypted = encryptPassword(normalizeMailboxPassword(body.smtp_password));
       }
     }
 

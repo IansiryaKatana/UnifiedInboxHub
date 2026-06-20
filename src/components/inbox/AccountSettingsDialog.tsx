@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { supabase } from "@/integrations/supabase/client";
 import { runGmailSyncInChunks } from "@/lib/gmailSyncChunks";
+import { runImapSyncInChunks } from "@/lib/imapSyncChunks";
 import { toast } from "sonner";
 import { Loader2, RefreshCw, Trash2, Eye, EyeOff } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -21,7 +22,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { parseEdgeFunctionFailure } from "@/lib/edge-function-error";
+import { normalizeMailboxPassword } from "@/lib/mail-credentials";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { AppPasswordSetupAlert } from "@/components/inbox/AppPasswordSetupAlert";
 import {
   Select,
   SelectContent,
@@ -81,6 +84,7 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
     mailbox_password: "",
   });
   const [imapMailProvider, setImapMailProvider] = useState<string>(MAIL_PRESET_NONE);
+  const settingsAppPasswordGuide = getMailProviderPreset(imapMailProvider)?.appPasswordGuide;
   const [showMailboxPassword, setShowMailboxPassword] = useState(false);
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
 
@@ -133,6 +137,9 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
     setSaving(true);
     try {
       const email = form.email_address.trim();
+      const mailboxPassword = form.mailbox_password.trim()
+        ? normalizeMailboxPassword(form.mailbox_password)
+        : undefined;
       const { data, error } = await supabase.functions.invoke("account-credentials-update", {
         body: {
           account_id: account.id,
@@ -144,12 +151,12 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
                 imap_host: form.imap_host.trim(),
                 imap_port: Number(form.imap_port),
                 imap_username: email,
-                imap_password: form.mailbox_password.trim() || undefined,
+                imap_password: mailboxPassword,
                 imap_use_tls: form.imap_use_tls,
                 smtp_host: form.smtp_host.trim(),
                 smtp_port: Number(form.smtp_port),
                 smtp_username: email,
-                smtp_password: form.mailbox_password.trim() || undefined,
+                smtp_password: mailboxPassword,
               }
             : {}),
         },
@@ -176,13 +183,10 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
         });
         toast.success(imported > 0 ? `Imported ${imported} new messages` : "Inbox is up to date");
       } else {
-        const { data, error } = await supabase.functions.invoke("imap-sync", {
-          body: { account_id: account.id, max_messages: 80 },
+        const { imported } = await runImapSyncInChunks(supabase, account.id, {
+          maxMessages: 25,
         });
-        if (error || !data?.ok) {
-          throw new Error(parseEdgeFunctionFailure(data, error));
-        }
-        toast.success(`Synced ${data.imported ?? 0} emails`);
+        toast.success(imported > 0 ? `Imported ${imported} messages` : "Inbox is up to date");
       }
       await onSaved();
     } catch (e) {
@@ -280,6 +284,9 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
                         </SelectContent>
                       </Select>
                     </div>
+                    {settingsAppPasswordGuide ? (
+                      <AppPasswordSetupAlert guide={settingsAppPasswordGuide} />
+                    ) : null}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div className="space-y-1.5">
                         <Label>IMAP host</Label>
@@ -298,15 +305,22 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
                         <Input type="number" value={form.smtp_port} onChange={(e) => setForm((v) => ({ ...v, smtp_port: +e.target.value }))} />
                       </div>
                       <div className="space-y-1.5 sm:col-span-2">
-                        <Label>New mailbox password (optional)</Label>
+                        <Label>
+                          {settingsAppPasswordGuide?.passwordFieldLabel ?? "New mailbox password (optional)"}
+                        </Label>
                         <p className="text-[11px] text-muted-foreground -mt-0.5 mb-1">
-                          Applies to both IMAP and SMTP. Leave blank to keep the current password.
+                          {settingsAppPasswordGuide
+                            ? settingsAppPasswordGuide.passwordHint
+                            : "Applies to both IMAP and SMTP. Leave blank to keep the current password."}
                         </p>
                         <div className="relative">
                           <Input
                             type={showMailboxPassword ? "text" : "password"}
                             value={form.mailbox_password}
                             onChange={(e) => setForm((v) => ({ ...v, mailbox_password: e.target.value }))}
+                            placeholder={
+                              settingsAppPasswordGuide?.passwordPlaceholder ?? "Leave blank to keep current password"
+                            }
                             className="pr-10"
                             autoComplete="new-password"
                           />

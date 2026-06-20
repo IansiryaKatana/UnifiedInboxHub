@@ -1,5 +1,6 @@
 // Encrypt and store IMAP/SMTP credentials server-side. Plaintext password never persisted.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { normalizeMailboxPassword } from "../_shared/mail-credentials.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -33,14 +34,32 @@ Deno.serve(async (req) => {
     const body = await req.json();
     const { email_address, display_name, color, imap_host, imap_port, imap_username, imap_password, smtp_host, smtp_port, smtp_username, smtp_password, imap_use_tls } = body ?? {};
 
-    const emailTrim = typeof email_address === "string" ? email_address.trim() : "";
-    const imapPass = typeof imap_password === "string" ? imap_password : "";
-    const smtpPass = typeof smtp_password === "string" && smtp_password.length > 0 ? smtp_password : imapPass;
-    const imapUser = typeof imap_username === "string" && imap_username.trim() ? imap_username.trim() : emailTrim;
-    const smtpUser = typeof smtp_username === "string" && smtp_username.trim() ? smtp_username.trim() : emailTrim;
+    const emailTrim = typeof email_address === "string" ? email_address.trim().toLowerCase() : "";
+    const imapPass = typeof imap_password === "string" ? normalizeMailboxPassword(imap_password) : "";
+    const smtpPassRaw = typeof smtp_password === "string" && smtp_password.length > 0 ? smtp_password : imap_password;
+    const smtpPass = typeof smtpPassRaw === "string" && smtpPassRaw.length > 0 ? normalizeMailboxPassword(smtpPassRaw) : imapPass;
+    const imapUser = typeof imap_username === "string" && imap_username.trim()
+      ? imap_username.trim().toLowerCase()
+      : emailTrim;
+    const smtpUser = typeof smtp_username === "string" && smtp_username.trim()
+      ? smtp_username.trim().toLowerCase()
+      : emailTrim;
 
     if (!emailTrim || !imap_host || !imapPass || !smtp_host || !imapUser || !smtpUser || !smtpPass) {
       return new Response(JSON.stringify({ error: "Missing required fields (email, IMAP/SMTP hosts, password)" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    const { data: existing } = await supabase
+      .from("email_accounts")
+      .select("id")
+      .eq("user_id", user.id)
+      .ilike("email_address", emailTrim)
+      .maybeSingle();
+    if (existing) {
+      return new Response(JSON.stringify({ error: "This email address is already connected. Remove the existing account first or update it in settings." }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     const { data: account, error } = await supabase.from("email_accounts").insert({
