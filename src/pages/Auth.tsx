@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, Navigate, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,8 @@ import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
 
 const BLOCKED_REASON_KEY = "auth-blocked-reason";
+const LOGO_TAP_TARGET = 3;
+const LOGO_TAP_RESET_MS = 1_200;
 
 export default function Auth() {
   const { session, loading: authLoading } = useAuth();
@@ -18,6 +20,32 @@ export default function Auth() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const logoTapCountRef = useRef(0);
+  const logoTapResetTimerRef = useRef<number | null>(null);
+
+  const handleLogoTap = useCallback(() => {
+    if (logoTapResetTimerRef.current !== null) {
+      window.clearTimeout(logoTapResetTimerRef.current);
+    }
+    logoTapCountRef.current += 1;
+    if (logoTapCountRef.current >= LOGO_TAP_TARGET) {
+      logoTapCountRef.current = 0;
+      navigate("/control");
+      return;
+    }
+    logoTapResetTimerRef.current = window.setTimeout(() => {
+      logoTapCountRef.current = 0;
+      logoTapResetTimerRef.current = null;
+    }, LOGO_TAP_RESET_MS);
+  }, [navigate]);
+
+  useEffect(() => {
+    return () => {
+      if (logoTapResetTimerRef.current !== null) {
+        window.clearTimeout(logoTapResetTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     document.title = "Sign in — Unified Inbox Hub";
@@ -78,9 +106,10 @@ export default function Auth() {
             alt=""
             width={48}
             height={48}
-            className="size-12 rounded-2xl object-cover shadow-sm ring-1 ring-border/60"
+            className="size-12 rounded-2xl object-cover shadow-sm ring-1 ring-border/60 cursor-default select-none"
             decoding="async"
             aria-hidden
+            onClick={handleLogoTap}
           />
           <div>
             <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Unified Inbox Hub</h1>

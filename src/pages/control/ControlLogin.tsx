@@ -108,7 +108,7 @@ export function ControlLogin({ wrongAccount, onSignOut }: Props) {
                   required
                   autoComplete="username"
                   autoFocus
-                  placeholder="admin@company.com"
+                  placeholder="admin@unifiedinboxhub.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="h-11 border-neutral-700 bg-neutral-950 text-neutral-50 placeholder:text-neutral-500"
