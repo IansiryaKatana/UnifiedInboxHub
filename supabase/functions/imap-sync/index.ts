@@ -127,6 +127,16 @@ async function findThreadIdByParentMessageIds(
 
 const STALE_SYNC_MS = 3 * 60 * 1000;
 
+function isSessionBusyError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("unexpected close") ||
+    lower.includes("too many imap sessions") ||
+    lower.includes("maximum number of connections") ||
+    lower.includes("connection limit")
+  );
+}
+
 async function releaseStaleSyncLock(
   supabase: ReturnType<typeof createClient>,
   accountId: string,
@@ -746,6 +756,20 @@ async function handleImapSync(req: Request): Promise<Response> {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("imap-sync error:", msg);
+    if (isSessionBusyError(msg) && accountIdForError) {
+      try {
+        const supabaseErr = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+        await supabaseErr.from("email_accounts").update({ sync_status: "idle" }).eq("id", accountIdForError);
+      } catch { /* ignore */ }
+      return new Response(JSON.stringify({
+        ok: true,
+        imported: 0,
+        skipped: true,
+        reason: "session_busy",
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
     try {
       if (accountIdForError) {
         const supabaseErr = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);

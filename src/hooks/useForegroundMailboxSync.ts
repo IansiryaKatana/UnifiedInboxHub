@@ -316,7 +316,10 @@ export function useForegroundMailboxSync(
           const accountSyncStartedAt = Date.now();
           let result: Awaited<ReturnType<typeof syncEmailAccount>>;
           try {
-            result = await syncEmailAccount(supabase, acc, authHeaders, { foreground: true });
+            result = await syncEmailAccount(supabase, acc, authHeaders, {
+              foreground: true,
+              forceSync: options?.userInitiated,
+            });
           } finally {
             accountInFlightRef.current.delete(acc.id);
             lastRunByAccountRef.current[acc.id] = Date.now();

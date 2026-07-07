@@ -9,6 +9,7 @@ const sharedFiles = [
   "push-notify.ts",
   "rfc-mail.ts",
   "mail-credentials.ts",
+  "imap-connect.ts",
 ].map((name) => ({
   name: `_shared/${name}`,
   content: fs.readFileSync(path.join(root, `supabase/functions/_shared/${name}`), "utf8"),
