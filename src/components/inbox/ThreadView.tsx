@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { format } from "date-fns";
 import { AccountBadge } from "./AccountBadge";
@@ -60,10 +60,12 @@ interface Props {
   thread?: { has_starred?: boolean; folder?: string } | null;
   account: Account | null;
   onAfterAction: () => void;
+  /** Poll mailbox for replies after the user sends from this thread. */
+  onAfterSend?: (accountId: string) => void;
   onBack?: () => void;
 }
 
-export function ThreadView({ threadId, thread, account, onAfterAction, onBack }: Props) {
+export function ThreadView({ threadId, thread, account, onAfterAction, onAfterSend, onBack }: Props) {
   const renderEmailHtml = (rawHtml: string) => {
     const cleaned = rawHtml
       .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
@@ -97,8 +99,21 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
   const [acting, setActing] = useState<"archive" | "trash" | null>(null);
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const [trashConfirmOpen, setTrashConfirmOpen] = useState(false);
+  /** Poll thread messages while waiting for an inbound reply after send. */
+  const [waitingForReply, setWaitingForReply] = useState(false);
+  const inboundBaselineRef = useRef(0);
   /** `${messageId}-${attachmentIndex}` → signed download URL */
   const [signedAttachmentUrls, setSignedAttachmentUrls] = useState<Record<string, string>>({});
+
+  const reloadMessages = useCallback(async () => {
+    if (!threadId) return;
+    const { data } = await supabase
+      .from("emails")
+      .select("*")
+      .eq("thread_id", threadId)
+      .order("sent_at", { ascending: true });
+    setMessages((data ?? []) as EmailMsg[]);
+  }, [threadId]);
 
   useEffect(() => {
     if (!threadId) {
@@ -107,6 +122,7 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
     }
     setLoading(true);
     setComposerMode(null);
+    setWaitingForReply(false);
     setReplyBodyHtml("");
     setForwardBodyHtml("");
     setForwardTo("");
@@ -114,20 +130,58 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
     setForwardAttachments([]);
     setComposerEditorKey((k) => k + 1);
 
-    supabase
-      .from("emails")
-      .select("*")
-      .eq("thread_id", threadId)
-      .order("sent_at", { ascending: true })
-      .then(({ data }) => {
-        setMessages((data ?? []) as EmailMsg[]);
-        setLoading(false);
-        supabase.from("emails").update({ is_read: true }).eq("thread_id", threadId).then(() => {});
-        supabase.from("email_threads").update({ unread_count: 0 }).eq("id", threadId).then(() => {
-          onAfterAction();
-        });
+    void reloadMessages().then(() => {
+      setLoading(false);
+      supabase.from("emails").update({ is_read: true }).eq("thread_id", threadId).then(() => {});
+      supabase.from("email_threads").update({ unread_count: 0 }).eq("id", threadId).then(() => {
+        onAfterAction();
       });
-  }, [threadId]);
+    });
+  }, [threadId, reloadMessages]);
+
+  useEffect(() => {
+    if (!threadId) return;
+    const channel = supabase
+      .channel(`thread-emails-${threadId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "emails", filter: `thread_id=eq.${threadId}` },
+        (payload) => {
+          void reloadMessages();
+          const row = payload.new as { direction?: string };
+          if (row.direction === "inbound") setWaitingForReply(false);
+        },
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [threadId, reloadMessages]);
+
+  useEffect(() => {
+    if (!waitingForReply || !threadId) return;
+    const deadline = Date.now() + 60_000;
+    const tick = async () => {
+      if (Date.now() > deadline) {
+        setWaitingForReply(false);
+        return;
+      }
+      const { data } = await supabase
+        .from("emails")
+        .select("*")
+        .eq("thread_id", threadId)
+        .order("sent_at", { ascending: true });
+      const msgs = (data ?? []) as EmailMsg[];
+      setMessages(msgs);
+      const inboundCount = msgs.filter((m) => m.direction === "inbound").length;
+      if (inboundCount > inboundBaselineRef.current) {
+        setWaitingForReply(false);
+      }
+    };
+    void tick();
+    const interval = window.setInterval(tick, 2_000);
+    return () => window.clearInterval(interval);
+  }, [waitingForReply, threadId]);
 
   useEffect(() => {
     if (!threadId || messages.length === 0) return;
@@ -347,7 +401,10 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
 
     const { data: refreshedMessages } = await supabase.from("emails").select("*").eq("thread_id", threadId).order("sent_at", { ascending: true });
     setMessages((refreshedMessages ?? []) as EmailMsg[]);
+    inboundBaselineRef.current = (refreshedMessages ?? []).filter((m) => m.direction === "inbound").length;
+    if (!isForward) setWaitingForReply(true);
     onAfterAction();
+    onAfterSend?.(account.id);
   };
 
   const markThreadUnread = async () => {
@@ -609,6 +666,12 @@ export function ThreadView({ threadId, thread, account, onAfterAction, onBack }:
 
       <div className="flex-1 overflow-y-auto scrollbar-thin px-3 md:px-6 py-4 md:py-6 space-y-4 min-w-0">
         {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
+        {waitingForReply && (
+          <div className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin shrink-0" />
+            Checking for replies…
+          </div>
+        )}
         {messages.map((m) => (
           <article key={m.id} className="rounded-lg border border-border bg-card overflow-hidden">
             <header className="px-3 md:px-5 py-3 md:py-4 border-b border-border bg-muted/30 flex items-start justify-between gap-2 md:gap-4">

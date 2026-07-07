@@ -32,6 +32,8 @@ interface Props {
   selectedThreadId: string | null;
   onSelectThread: (id: string) => void;
   loading: boolean;
+  /** True while checking mailboxes for new mail (IMAP/Gmail sync). */
+  refreshing?: boolean;
   onRefresh: () => void;
   filterUnread: boolean;
   onToggleUnread: () => void;
@@ -48,6 +50,7 @@ export function ThreadList({
   selectedThreadId,
   onSelectThread,
   loading,
+  refreshing = false,
   onRefresh,
   filterUnread,
   onToggleUnread,
@@ -63,12 +66,19 @@ export function ThreadList({
   const pageSize = 100;
   const titleLabel = title ? title[0].toUpperCase() + title.slice(1) : title;
 
+  const threadMatchesQuery = (t: ThreadRow, ql: string) =>
+    (t.subject ?? "").toLowerCase().includes(ql) ||
+    (t.snippet ?? "").toLowerCase().includes(ql) ||
+    (t.latest_sender_name ?? "").toLowerCase().includes(ql) ||
+    (t.latest_sender ?? "").toLowerCase().includes(ql);
+
   useEffect(() => {
     const q = query.trim();
     if (q.length < 2) {
       setSearchThreadIds(null);
       return;
     }
+    setSearchThreadIds(null);
     let cancelled = false;
     const t = window.setTimeout(() => {
       void (async () => {
@@ -87,8 +97,10 @@ export function ThreadList({
         if (!emFts.error && !thFts.error) {
           for (const r of emFts.data ?? []) if (r.thread_id) allow.add(r.thread_id);
           for (const r of thFts.data ?? []) allow.add(r.id);
-          setSearchThreadIds([...allow]);
-          return;
+          if (allow.size > 0) {
+            setSearchThreadIds([...allow]);
+            return;
+          }
         }
         const esc = q.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
         const pat = `%${esc}%`;
@@ -124,17 +136,12 @@ export function ThreadList({
     let list = threads;
     if (filterUnread) list = list.filter(t => t.unread_count > 0);
     const q = query.trim();
+    const ql = q.toLowerCase();
     if (q.length >= 2 && searchThreadIds !== null) {
       const allow = new Set(searchThreadIds);
-      list = list.filter(t => allow.has(t.id));
+      list = list.filter(t => allow.has(t.id) || threadMatchesQuery(t, ql));
     } else if (q.length > 0) {
-      const ql = q.toLowerCase();
-      list = list.filter(t =>
-        (t.subject ?? "").toLowerCase().includes(ql) ||
-        (t.snippet ?? "").toLowerCase().includes(ql) ||
-        (t.latest_sender_name ?? "").toLowerCase().includes(ql) ||
-        (t.latest_sender ?? "").toLowerCase().includes(ql)
-      );
+      list = list.filter(t => threadMatchesQuery(t, ql));
     }
     return list;
   }, [threads, filterUnread, query, searchThreadIds]);
@@ -155,8 +162,15 @@ export function ThreadList({
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-lg font-semibold tracking-tight pl-12 md:pl-0 truncate">{titleLabel}</h2>
           <div className="flex items-center gap-1">
-            <Button variant="ghost" size="icon" onClick={onRefresh} aria-label="Refresh">
-              <RefreshCw className={cn("size-4", loading && "animate-spin")} />
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onRefresh}
+              disabled={refreshing}
+              aria-label="Check for new mail"
+              title="Check for new mail"
+            >
+              <RefreshCw className={cn("size-4", (loading || refreshing) && "animate-spin")} />
             </Button>
             <Button
               variant={filterUnread ? "default" : "ghost"}

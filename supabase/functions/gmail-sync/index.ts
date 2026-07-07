@@ -322,6 +322,11 @@ Deno.serve(async (req) => {
       .from("email_accounts").select("*").eq("id", accountId).eq("user_id", userId).single();
     if (accErr || !account) return new Response(JSON.stringify({ error: "Account not found" }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     if (account.provider_type !== "gmail") return new Response(JSON.stringify({ error: "Not a Gmail account" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    if (account.sync_status === "disconnected") {
+      return new Response(JSON.stringify({ ok: true, imported: 0, skipped: true, reason: "account_disconnected" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     const STALE_SYNC_MS = 3 * 60 * 1000;
     if (account.sync_status === "syncing" && account.updated_at) {

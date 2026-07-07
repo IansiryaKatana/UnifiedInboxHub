@@ -23,7 +23,7 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { runGmailSyncInChunks } from "@/lib/gmailSyncChunks";
-import { runImapSyncInChunks } from "@/lib/imapSyncChunks";
+import { runImapFullSync } from "@/lib/imapSyncChunks";
 import { Progress } from "@/components/ui/progress";
 import {
   getMailProviderPreset,
@@ -33,6 +33,7 @@ import {
 } from "@/lib/mail-provider-presets";
 import { parseEdgeFunctionFailure } from "@/lib/edge-function-error";
 import { normalizeMailboxPassword } from "@/lib/mail-credentials";
+import { withMailboxSyncPaused } from "@/lib/mailbox-sync-pause";
 
 interface Props {
   open: boolean;
@@ -59,6 +60,7 @@ const initialImapFlow = () => ({
   message: "",
   progress: 0,
   imported: 0,
+  mailboxTotal: undefined as number | undefined,
   connectedEmail: undefined as string | undefined,
 });
 
@@ -87,6 +89,7 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
   const [imapFlow, setImapFlow] = useState<ReturnType<typeof initialImapFlow>>(initialImapFlow);
   const popupRef = useRef<Window | null>(null);
   const popupWatchRef = useRef<number | null>(null);
+  const imapLastStoredRef = useRef(0);
   const [imap, setImap] = useState(defaultImapState);
   const [imapMailProvider, setImapMailProvider] = useState<string>(MAIL_PRESET_NONE);
   const [showMailboxPassword, setShowMailboxPassword] = useState(false);
@@ -170,18 +173,6 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
     }, 450);
     return () => window.clearInterval(id);
   }, [gmailFlow.status]);
-
-  useEffect(() => {
-    if (imapFlow.status !== "syncing") return;
-    const id = window.setInterval(() => {
-      setImapFlow((prev) => {
-        if (prev.status !== "syncing") return prev;
-        const next = Math.min(92, prev.progress + 5);
-        return { ...prev, progress: next };
-      });
-    }, 450);
-    return () => window.clearInterval(id);
-  }, [imapFlow.status]);
 
   useEffect(() => {
     const onMessage = async (e: MessageEvent) => {
@@ -363,6 +354,8 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
       toast.error("Could not load settings for that provider. Try again or choose “My provider isn't listed”.");
       return;
     }
+
+    await withMailboxSyncPaused(async () => {
     setBusy(true);
     setImapFlow({
       ...initialImapFlow(),
@@ -405,42 +398,40 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
     setImapFlow({
       status: "syncing",
       connectedEmail: email,
-      message: `Fetching mail for ${email}…`,
-      progress: 35,
+      message: `Connecting to ${email}…`,
+      progress: 8,
       imported: 0,
+      mailboxTotal: undefined,
     });
+    imapLastStoredRef.current = 0;
 
     try {
-      const { count: baselineCount } = await supabase
-        .from("emails")
-        .select("id", { count: "exact", head: true })
-        .eq("account_id", accountId);
-
-      let chunkCount = 0;
-      const { imported: totalImported } = await runImapSyncInChunks(supabase, accountId, {
-        maxMessages: 25,
-        maxChunks: 12,
-        onProgress: async ({ totalImported: aggImported, hasMore }) => {
-          chunkCount += 1;
-          const { count: liveCount } = await supabase
-            .from("emails")
-            .select("id", { count: "exact", head: true })
-            .eq("account_id", accountId);
-          const importedLive = Math.max(aggImported, Math.max(0, (liveCount ?? 0) - (baselineCount ?? 0)));
+      const { imported: totalImported } = await runImapFullSync(supabase, accountId, {
+        maxMessages: 8,
+        maxBackfillChunks: 50,
+        onProgress: async (p) => {
           setImapFlow((prev) => ({
             ...prev,
             status: "syncing",
-            progress: hasMore ? Math.min(95, 35 + chunkCount * 6) : 100,
-            imported: importedLive,
-            message: hasMore
-              ? `Fetching emails… ${importedLive} imported so far.`
-              : `Sync complete · ${importedLive} email${importedLive === 1 ? "" : "s"} imported.`,
+            progress: Math.max(prev.progress, p.progress),
+            imported: p.storedInApp,
+            mailboxTotal: p.mailboxTotal,
+            message: p.message || (p.hasMore
+              ? `Fetching emails… ${p.storedInApp} imported so far.`
+              : `Sync complete · ${p.storedInApp} email${p.storedInApp === 1 ? "" : "s"} imported.`),
           }));
-          await onAccountAdded();
+          if (p.storedInApp > imapLastStoredRef.current) {
+            imapLastStoredRef.current = p.storedInApp;
+            await onAccountAdded();
+          }
         },
       });
 
       await onAccountAdded();
+      await supabase
+        .from("email_accounts")
+        .update({ sync_status: "idle", last_sync_error: null })
+        .eq("id", accountId);
       setImapFlow((prev) => ({
         ...prev,
         status: "success",
@@ -458,17 +449,35 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const timedOut =
+        /546|504|compute resources|gateway timeout/i.test(msg);
+      await supabase
+        .from("email_accounts")
+        .update({
+          sync_status: "error",
+          last_sync_error: timedOut
+            ? "Initial sync timed out — open account settings and tap Sync to continue."
+            : msg.slice(0, 500),
+        })
+        .eq("id", accountId);
       setImapFlow((prev) => ({
         ...prev,
-        status: "error",
-        message: `Connected, but initial sync failed: ${msg}`,
+        status: timedOut ? "success" : "error",
+        message: timedOut
+          ? `${email} is connected. Mail import timed out — use Sync in account settings to finish.`
+          : `Connected, but initial sync failed: ${msg}`,
         progress: 100,
       }));
-      toast.error(`Connected, but initial sync failed: ${msg}`);
+      toast[timedOut ? "success" : "error"](
+        timedOut
+          ? `${email} connected. Tap Sync in account settings to import mail.`
+          : `Connected, but initial sync failed: ${msg}`,
+      );
       await onAccountAdded();
     } finally {
       setBusy(false);
     }
+    });
   };
 
   const handleSheetOpenChange = (next: boolean) => {
@@ -834,6 +843,15 @@ export function AddAccountDialog({ open, onOpenChange, onAccountAdded }: Props) 
                 ) : null}
                 <p className="text-xs text-muted-foreground">{imapFlow.message}</p>
                 <Progress value={imapFlow.progress} className="h-2" />
+                {imapFlow.status === "syncing" && imapFlow.mailboxTotal && imapFlow.mailboxTotal > 0 ? (
+                  <p className="text-xs text-muted-foreground tabular-nums">
+                    {imapFlow.imported} of ~{imapFlow.mailboxTotal} messages in mailbox
+                  </p>
+                ) : imapFlow.status === "syncing" && imapFlow.imported > 0 ? (
+                  <p className="text-xs text-muted-foreground tabular-nums">
+                    {imapFlow.imported} message{imapFlow.imported === 1 ? "" : "s"} imported so far
+                  </p>
+                ) : null}
                 {imapFlow.status === "syncing" && imapFlow.imported > 0 ? (
                   <p className="text-[11px] text-muted-foreground">
                     New messages appear in your inbox list as they arrive — no need to refresh the page.

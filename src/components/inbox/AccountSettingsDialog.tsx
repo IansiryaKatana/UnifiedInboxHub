@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { supabase } from "@/integrations/supabase/client";
 import { runGmailSyncInChunks } from "@/lib/gmailSyncChunks";
-import { runImapSyncInChunks } from "@/lib/imapSyncChunks";
+import { runImapIncrementalSync, type ImapSyncLiveProgress } from "@/lib/imapSyncChunks";
+import { withMailboxSyncPaused } from "@/lib/mailbox-sync-pause";
 import { toast } from "sonner";
 import { Loader2, RefreshCw, Trash2, Eye, EyeOff } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -22,6 +23,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { parseEdgeFunctionFailure } from "@/lib/edge-function-error";
+import { deleteEmailAccount } from "@/lib/delete-email-account";
 import { normalizeMailboxPassword } from "@/lib/mail-credentials";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AppPasswordSetupAlert } from "@/components/inbox/AppPasswordSetupAlert";
@@ -87,10 +89,14 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
   const settingsAppPasswordGuide = getMailProviderPreset(imapMailProvider)?.appPasswordGuide;
   const [showMailboxPassword, setShowMailboxPassword] = useState(false);
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<ImapSyncLiveProgress | null>(null);
 
   useEffect(() => {
-    if (!open) setRemoveConfirmOpen(false);
-  }, [open]);
+    if (!open) {
+      setRemoveConfirmOpen(false);
+      if (!syncing) setSyncProgress(null);
+    }
+  }, [open, syncing]);
 
   useEffect(() => {
     if (!account) return;
@@ -175,22 +181,69 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
   const syncNow = async () => {
     if (!account) return;
     setSyncing(true);
+    setSyncProgress({
+      phase: "checking",
+      chunkImported: 0,
+      totalImported: 0,
+      hasMore: true,
+      storedInApp: 0,
+      progress: 5,
+      message: "Starting sync…",
+    });
     try {
+      await withMailboxSyncPaused(async () => {
       if (account.provider_type === "gmail") {
+        let totalImported = 0;
         const { imported } = await runGmailSyncInChunks(supabase, account.id, {
           maxPagesPerChunk: 1,
           pageSize: 20,
-        });
-        toast.success(imported > 0 ? `Imported ${imported} new messages` : "Inbox is up to date");
-      } else {
-        const { imported } = await runImapSyncInChunks(supabase, account.id, {
-          maxMessages: 25,
+          onProgress: async ({ totalImported: agg, hasMore }) => {
+            totalImported = agg;
+            setSyncProgress({
+              phase: hasMore ? "new-mail" : "complete",
+              chunkImported: 0,
+              totalImported: agg,
+              hasMore,
+              storedInApp: agg,
+              progress: hasMore ? Math.min(95, 20 + agg * 2) : 100,
+              message: hasMore
+                ? `Syncing Gmail… ${agg} message${agg === 1 ? "" : "s"} imported so far.`
+                : `Done — ${agg} message${agg === 1 ? "" : "s"} imported.`,
+            });
+            await onSaved();
+          },
         });
         toast.success(imported > 0 ? `Imported ${imported} messages` : "Inbox is up to date");
+      } else {
+        const { imported, storedInApp, mailboxTotal } = await runImapIncrementalSync(supabase, account.id, {
+          onProgress: async (p) => {
+            setSyncProgress(p);
+            if (p.totalImported > 0) await onSaved();
+          },
+        });
+        await supabase
+          .from("email_accounts")
+          .update({ sync_status: "idle", last_sync_error: null })
+          .eq("id", account.id);
+        toast.success(
+          imported > 0
+            ? `Imported ${imported} messages (${storedInApp}${mailboxTotal ? ` of ~${mailboxTotal}` : ""} in inbox)`
+            : storedInApp > 0
+              ? `Inbox is up to date (${storedInApp}${mailboxTotal ? ` of ~${mailboxTotal}` : ""} synced)`
+              : "Inbox is up to date",
+        );
       }
       await onSaved();
+      });
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
+      setSyncProgress(null);
+      if (account.provider_type === "imap") {
+        await supabase
+          .from("email_accounts")
+          .update({ sync_status: "idle" })
+          .eq("id", account.id);
+      }
     } finally {
       setSyncing(false);
     }
@@ -200,18 +253,64 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
     if (!account) return;
     setRemoving(true);
     try {
+      // #region agent log
+      fetch("http://127.0.0.1:7618/ingest/5e429cc6-9e4d-4191-8a07-7d3d98cdf51b", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "44192d" },
+        body: JSON.stringify({
+          sessionId: "44192d",
+          runId: "post-fix-v4",
+          hypothesisId: "C",
+          location: "AccountSettingsDialog.tsx:executeRemoveAccount:start",
+          message: "remove started",
+          data: { accountId: account.id, usesOnRemove: Boolean(onRemove) },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+
       if (onRemove) {
         await onRemove(account.id);
       } else {
-        await supabase.from("emails").delete().eq("account_id", account.id);
-        await supabase.from("email_threads").delete().eq("account_id", account.id);
-        const { error } = await supabase.from("email_accounts").delete().eq("id", account.id);
-        if (error) throw new Error(error.message);
+        await deleteEmailAccount(supabase, account.id);
       }
+
+      // #region agent log
+      fetch("http://127.0.0.1:7618/ingest/5e429cc6-9e4d-4191-8a07-7d3d98cdf51b", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "44192d" },
+        body: JSON.stringify({
+          sessionId: "44192d",
+          runId: "post-fix-v4",
+          hypothesisId: "C",
+          location: "AccountSettingsDialog.tsx:executeRemoveAccount:success-path",
+          message: "remove completed without throw — showing success toast",
+          data: { accountId: account.id },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+
       toast.success("Account removed");
       setRemoveConfirmOpen(false);
       onOpenChange(false);
     } catch (e) {
+      // #region agent log
+      fetch("http://127.0.0.1:7618/ingest/5e429cc6-9e4d-4191-8a07-7d3d98cdf51b", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "44192d" },
+        body: JSON.stringify({
+          sessionId: "44192d",
+          runId: "post-fix-v4",
+          hypothesisId: "C",
+          location: "AccountSettingsDialog.tsx:executeRemoveAccount:catch",
+          message: "remove threw",
+          data: { accountId: account.id, error: e instanceof Error ? e.message : String(e) },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setRemoving(false);
@@ -366,6 +465,43 @@ export function AccountSettingsDialog({ open, onOpenChange, account, onSaved, on
                     <AlertTitle className="text-sm">Last sync error</AlertTitle>
                     <AlertDescription className="text-xs break-words">{account.last_sync_error}</AlertDescription>
                   </Alert>
+                ) : null}
+                {account.provider_type === "imap" &&
+                settingsAppPasswordGuide &&
+                account.last_sync_error &&
+                /imap connect failed|unexpected close|authentication failed|invalid credentials/i.test(account.last_sync_error) ? (
+                  <AppPasswordSetupAlert guide={settingsAppPasswordGuide} />
+                ) : null}
+                {account.provider_type === "imap" ? (
+                  <p className="text-xs text-muted-foreground">
+                    Sync now checks for new mail only (~10–20 seconds). First connect imports recent mail;
+                    use this after sending a test email or when the inbox looks stale.
+                  </p>
+                ) : null}
+                {syncing && syncProgress ? (
+                  <div className="rounded-lg border bg-muted/30 p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="size-4 animate-spin text-primary shrink-0" />
+                      <p className="text-sm font-medium">
+                        {syncProgress.phase === "older-mail"
+                          ? "Importing mail"
+                          : syncProgress.phase === "new-mail"
+                            ? "Checking for new mail"
+                            : "Syncing"}
+                      </p>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{syncProgress.message}</p>
+                    <Progress value={syncProgress.progress} className="h-2" />
+                    {syncProgress.mailboxTotal && syncProgress.mailboxTotal > 0 ? (
+                      <p className="text-xs text-muted-foreground tabular-nums">
+                        {syncProgress.storedInApp} of ~{syncProgress.mailboxTotal} messages in mailbox
+                      </p>
+                    ) : syncProgress.storedInApp > 0 ? (
+                      <p className="text-xs text-muted-foreground tabular-nums">
+                        {syncProgress.storedInApp} message{syncProgress.storedInApp === 1 ? "" : "s"} in app
+                      </p>
+                    ) : null}
+                  </div>
                 ) : null}
                 <Button onClick={syncNow} disabled={syncing} className="w-full gap-2">
                   {syncing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}

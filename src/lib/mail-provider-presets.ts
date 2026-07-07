@@ -269,6 +269,14 @@ export function matchMailProviderPresetFromHosts(imapHost: string, smtpHost: str
   const ih = imapHost.trim().toLowerCase();
   const sh = smtpHost.trim().toLowerCase();
   if (!ih || !sh) return MAIL_PRESET_NONE;
+
+  if (
+    (ih === "imap0101.titan.email" && sh === "smtp0101.titan.email") ||
+    (ih === "imap0101.titan.email" && sh === "smtp.titan.email")
+  ) {
+    return MAIL_PRESET_TITAN;
+  }
+
   const hit = MAIL_PROVIDER_PRESETS.find(
     (p) => p.imap_host.toLowerCase() === ih && p.smtp_host.toLowerCase() === sh,
   );

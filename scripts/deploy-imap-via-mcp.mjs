@@ -19,7 +19,7 @@ const indexTs = fs.readFileSync(path.join(root, "supabase/functions/imap-sync/in
 const payload = {
   name: "imap-sync",
   entrypoint_path: "imap-sync/index.ts",
-  verify_jwt: true,
+  verify_jwt: false,
   files: [
     { name: "imap-sync/index.ts", content: indexTs },
     ...sharedFiles,

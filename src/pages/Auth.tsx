@@ -4,173 +4,153 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Loader2, Eye, EyeOff } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
+
+const BLOCKED_REASON_KEY = "auth-blocked-reason";
 
 export default function Auth() {
   const { session, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     document.title = "Sign in — Unified Inbox Hub";
+    const blocked = sessionStorage.getItem(BLOCKED_REASON_KEY);
+    if (blocked) {
+      toast.error(blocked);
+      sessionStorage.removeItem(BLOCKED_REASON_KEY);
+    }
   }, []);
 
-  if (authLoading) return null;
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-soft via-background to-background p-4">
+        <Loader2 className="size-8 animate-spin text-muted-foreground" aria-label="Loading" />
+      </div>
+    );
+  }
   if (session) return <Navigate to="/" replace />;
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    setLoading(false);
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim().toLowerCase(), password });
     if (error) {
-      toast.error(error.message);
-    } else {
-      navigate("/");
+      setLoading(false);
+      const msg =
+        error.message.toLowerCase().includes("invalid login credentials")
+          ? "Incorrect email or password."
+          : error.message;
+      toast.error(msg);
+      return;
     }
-  };
 
-  const handleSignUp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/confirmed`,
-        data: { display_name: name },
-      },
-    });
-    setLoading(false);
-    if (error) {
-      toast.error(error.message);
-    } else if (data.user && (data.user.identities?.length ?? 0) === 0) {
-      // Supabase can return an obfuscated "already exists" response with no identities.
-      toast.error("This email is already registered. Sign in or reset your password instead.");
-    } else if (data.session) {
-      toast.success("Account created — you're signed in.");
-      navigate("/");
-    } else {
-      toast.success("Check your email to confirm your account, then you can sign in.");
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const [{ data: active }, { data: adminRole }] = await Promise.all([
+        supabase.rpc("user_has_active_access", { _user_id: user.id }),
+        supabase.rpc("has_role", { _user_id: user.id, _role: "admin" }),
+      ]);
+      if (!active && !adminRole) {
+        await supabase.auth.signOut();
+        setLoading(false);
+        toast.error("Your access has expired. Contact your administrator.");
+        return;
+      }
     }
+
+    setLoading(false);
+    navigate("/");
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-soft via-background to-background p-4">
-      <div className="w-full max-w-md">
-        <div className="flex items-center justify-center gap-2 mb-8">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-soft via-background to-background px-4 py-8 sm:px-6">
+      <div className="w-full max-w-[420px]">
+        <div className="flex flex-col items-center gap-3 mb-8 text-center">
           <img
             src="/pwa-192.png"
             alt=""
-            width={40}
-            height={40}
-            className="size-10 rounded-xl object-cover shrink-0"
+            width={48}
+            height={48}
+            className="size-12 rounded-2xl object-cover shadow-sm ring-1 ring-border/60"
             decoding="async"
             aria-hidden
           />
-          <h1 className="text-2xl font-semibold tracking-tight">Unified Inbox Hub</h1>
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Unified Inbox Hub</h1>
+            <p className="mt-1 text-sm text-muted-foreground">All your inboxes in one place</p>
+          </div>
         </div>
 
-        <Card className="p-6 shadow-lg">
-          <Tabs defaultValue="signin" className="w-full">
-            <TabsList className="grid grid-cols-2 w-full mb-6">
-              <TabsTrigger value="signin">Sign in</TabsTrigger>
-              <TabsTrigger value="signup">Create account</TabsTrigger>
-            </TabsList>
+        <Card className="border-border/80 bg-card/95 p-6 shadow-lg backdrop-blur-sm sm:p-8">
+          <div className="mb-6 space-y-1">
+            <h2 className="text-lg font-semibold tracking-tight">Sign in</h2>
+            <p className="text-sm text-muted-foreground">Enter your email and password to continue.</p>
+          </div>
 
-            <TabsContent value="signin">
-              <form onSubmit={handleSignIn} className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="signin-email">Email</Label>
-                  <Input id="signin-email" type="email" required value={email} onChange={e => setEmail(e.target.value)} />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="signin-password">Password</Label>
-                  <div className="relative">
-                    <Input
-                      id="signin-password"
-                      type={showPassword ? "text" : "password"}
-                      required
-                      value={password}
-                      onChange={e => setPassword(e.target.value)}
-                      className="pr-10"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(v => !v)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                      aria-label={showPassword ? "Hide password" : "Show password"}
-                    >
-                      {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                    </button>
-                  </div>
-                </div>
-                <Button type="submit" className="w-full" disabled={loading}>
-                  {loading && <Loader2 className="size-4 mr-2 animate-spin" />}
-                  Sign in
-                </Button>
-                <p className="text-center pt-1">
-                  <Link
-                    to="/auth/reset-password"
-                    className="inline-flex items-center justify-center rounded-md border border-border/70 bg-muted/50 px-3 py-1.5 text-sm font-medium text-primary transition-colors hover:border-primary/40 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                  >
-                    Forgot password?
-                  </Link>
-                </p>
-              </form>
-            </TabsContent>
+          <form onSubmit={handleSignIn} className="space-y-5">
+            <div className="space-y-2">
+              <Label htmlFor="signin-email">Email</Label>
+              <Input
+                id="signin-email"
+                type="email"
+                required
+                autoComplete="email"
+                autoFocus
+                placeholder="you@company.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="h-11"
+              />
+            </div>
 
-            <TabsContent value="signup">
-              <form onSubmit={handleSignUp} className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="signup-name">Name</Label>
-                  <Input id="signup-name" required value={name} onChange={e => setName(e.target.value)} />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="signup-email">Email</Label>
-                  <Input id="signup-email" type="email" required value={email} onChange={e => setEmail(e.target.value)} />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="signup-password">Password</Label>
-                  <div className="relative">
-                    <Input
-                      id="signup-password"
-                      type={showPassword ? "text" : "password"}
-                      required
-                      minLength={8}
-                      value={password}
-                      onChange={e => setPassword(e.target.value)}
-                      className="pr-10"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(v => !v)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                      aria-label={showPassword ? "Hide password" : "Show password"}
-                    >
-                      {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                    </button>
-                  </div>
-                </div>
-                <Button type="submit" className="w-full" disabled={loading}>
-                  {loading && <Loader2 className="size-4 mr-2 animate-spin" />}
-                  Create account
-                </Button>
-              </form>
-            </TabsContent>
-          </Tabs>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="signin-password">Password</Label>
+                <Link
+                  to="/auth/reset-password"
+                  className="text-xs font-medium text-primary hover:underline underline-offset-2 shrink-0"
+                >
+                  Forgot password?
+                </Link>
+              </div>
+              <div className="relative">
+                <Input
+                  id="signin-password"
+                  type={showPassword ? "text" : "password"}
+                  required
+                  autoComplete="current-password"
+                  placeholder="Enter your password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="h-11 pr-11"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                >
+                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                </button>
+              </div>
+            </div>
+
+            <Button type="submit" className="h-11 w-full text-sm font-medium" disabled={loading}>
+              {loading ? <Loader2 className="size-4 mr-2 animate-spin" /> : null}
+              Sign in
+            </Button>
+          </form>
         </Card>
 
-        <p className="text-center text-xs text-muted-foreground mt-6 leading-relaxed">
-          Manage all your inboxes in one place. By continuing, you agree to our{" "}
+        <p className="mt-6 text-center text-xs leading-relaxed text-muted-foreground px-2">
+          By signing in, you agree to our{" "}
           <Link to="/terms" className="underline underline-offset-2 hover:text-foreground">
             Terms of Service
           </Link>{" "}
@@ -184,3 +164,5 @@ export default function Auth() {
     </div>
   );
 }
+
+export { BLOCKED_REASON_KEY };

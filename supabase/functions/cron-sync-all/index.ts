@@ -8,7 +8,14 @@ const corsHeaders = {
 };
 
 type ProviderType = "gmail" | "imap";
-type AccountRow = { id: string; user_id: string; provider_type: ProviderType };
+type AccountRow = {
+  id: string;
+  user_id: string;
+  provider_type: ProviderType;
+  imap_last_uid?: number | null;
+  sync_status?: string;
+  updated_at?: string | null;
+};
 type SyncResult = {
   id: string;
   provider_type: ProviderType;
@@ -24,12 +31,19 @@ const DEFAULT_BATCH_SIZE = 4;
 const DEFAULT_TIMEOUT_MS = 55_000;
 const MAX_BATCH_SIZE = 20;
 const MAX_TIMEOUT_MS = 120_000;
+const STALE_SYNC_MS = 3 * 60_000;
 
 function readIntEnv(name: string, fallback: number, min: number, max: number): number {
   const raw = Deno.env.get(name);
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
+function isActiveSync(acc: AccountRow): boolean {
+  if (acc.sync_status !== "syncing") return false;
+  if (!acc.updated_at) return false;
+  return Date.now() - new Date(acc.updated_at).getTime() < STALE_SYNC_MS;
 }
 
 type SyncPayload = {
@@ -43,95 +57,73 @@ type SyncPayload = {
   reason?: string;
 };
 
-async function invokeImapSyncChunked(
+async function invokeImapSyncLight(
   baseUrl: string,
   serviceRoleKey: string,
   acc: AccountRow,
   timeoutMs: number,
 ): Promise<SyncResult> {
   const startedAt = Date.now();
-  const maxChunks = 6;
-  let resumeFirstSync = false;
-  let totalImported = 0;
-  let lastError: string | undefined;
-  let lastStatus = 200;
+  const hasUid = (acc.imap_last_uid ?? 0) > 0;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort("timeout"), timeoutMs);
 
-  for (let chunk = 0; chunk < maxChunks; chunk++) {
-    const remainingMs = timeoutMs - (Date.now() - startedAt);
-    if (remainingMs < 5_000) break;
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort("timeout"), remainingMs);
+  try {
+    const res = await fetch(`${baseUrl}/functions/v1/imap-sync`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "x-internal-cron": "1",
+        "x-account-user-id": acc.user_id,
+      },
+      body: JSON.stringify({
+        account_id: acc.id,
+        max_messages: 8,
+        ...(hasUid ? { incremental_only: true } : {}),
+      }),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let payload: SyncPayload = {};
     try {
-      const res = await fetch(`${baseUrl}/functions/v1/imap-sync`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${serviceRoleKey}`,
-          "x-internal-cron": "1",
-          "x-account-user-id": acc.user_id,
-        },
-        body: JSON.stringify({
-          account_id: acc.id,
-          max_messages: 25,
-          ...(resumeFirstSync ? { resume_first_sync: true } : {}),
-        }),
-        signal: controller.signal,
-      });
-      const text = await res.text();
-      let payload: SyncPayload = {};
-      try {
-        payload = JSON.parse(text) as SyncPayload;
-      } catch { /* ignore */ }
+      payload = JSON.parse(text) as SyncPayload;
+    } catch { /* ignore */ }
 
-      lastStatus = res.status;
-      if (!res.ok || payload.ok === false) {
-        lastError = payload.error ?? text.slice(0, 300);
-        break;
-      }
-      if (payload.skipped) break;
-
-      totalImported += typeof payload.imported === "number" ? payload.imported : 0;
-      resumeFirstSync = Boolean(payload.resume_first_sync);
-      if (!payload.partial) break;
-    } catch (e) {
-      const timedOut = controller.signal.aborted;
-      return {
-        id: acc.id,
-        provider_type: acc.provider_type,
-        function_name: "imap-sync",
-        ok: false,
-        timeout: timedOut,
-        duration_ms: Date.now() - startedAt,
-        error: timedOut ? `Timed out after ${timeoutMs}ms` : String(e),
-      };
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    const httpOk = res.ok;
+    const bodyOk = payload.ok !== false;
+    return {
+      id: acc.id,
+      provider_type: acc.provider_type,
+      function_name: "imap-sync",
+      ok: httpOk && bodyOk,
+      status: res.status,
+      timeout: false,
+      duration_ms: Date.now() - startedAt,
+      error: payload.ok === false ? payload.error : (!httpOk ? text.slice(0, 300) : undefined),
+    };
+  } catch (e) {
+    const timedOut = controller.signal.aborted;
+    return {
+      id: acc.id,
+      provider_type: acc.provider_type,
+      function_name: "imap-sync",
+      ok: false,
+      timeout: timedOut,
+      duration_ms: Date.now() - startedAt,
+      error: timedOut ? `Timed out after ${timeoutMs}ms` : String(e),
+    };
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  return {
-    id: acc.id,
-    provider_type: acc.provider_type,
-    function_name: "imap-sync",
-    ok: !lastError,
-    status: lastStatus,
-    timeout: false,
-    duration_ms: Date.now() - startedAt,
-    error: lastError ?? (totalImported > 0 ? `imported=${totalImported}` : undefined),
-  };
 }
 
-async function invokeProviderSync(
+async function invokeGmailSync(
   baseUrl: string,
   serviceRoleKey: string,
   acc: AccountRow,
   timeoutMs: number,
 ): Promise<SyncResult> {
-  if (acc.provider_type === "imap") {
-    return invokeImapSyncChunked(baseUrl, serviceRoleKey, acc, timeoutMs);
-  }
-
   const fn = "gmail-sync";
   const startedAt = Date.now();
   const controller = new AbortController();
@@ -202,27 +194,31 @@ Deno.serve(async (req) => {
   const supabase = createClient(baseUrl, serviceRoleKey);
   const { data: accounts } = await supabase
     .from("email_accounts")
-    .select("id, user_id, provider_type")
-    .in("provider_type", ["gmail", "imap"]);
+    .select("id, user_id, provider_type, imap_last_uid, sync_status, updated_at")
+    .in("provider_type", ["gmail", "imap"])
+    .neq("sync_status", "disconnected");
 
   const typedAccounts = (accounts ?? []) as AccountRow[];
   const results: SyncResult[] = [];
 
-  for (let i = 0; i < typedAccounts.length; i += batchSize) {
-    const batch = typedAccounts.slice(i, i + batchSize);
-    const settled = await Promise.allSettled(
-      batch.map((acc) => invokeProviderSync(baseUrl, serviceRoleKey, acc, perAccountTimeoutMs)),
-    );
+  const gmailAccounts = typedAccounts.filter((a) => a.provider_type === "gmail");
+  const imapAccounts = typedAccounts.filter((a) => a.provider_type === "imap");
 
-    for (const item of settled) {
+  for (let i = 0; i < gmailAccounts.length; i += batchSize) {
+    const batch = gmailAccounts.slice(i, i + batchSize);
+    const settled = await Promise.allSettled(
+      batch.map((acc) => invokeGmailSync(baseUrl, serviceRoleKey, acc, perAccountTimeoutMs)),
+    );
+    for (let j = 0; j < settled.length; j++) {
+      const item = settled[j];
+      const acc = batch[j];
       if (item.status === "fulfilled") {
         results.push(item.value);
       } else {
-        // Defensive fallback; invokeProviderSync already traps most errors.
         results.push({
-          id: batch[0]?.id ?? "unknown",
-          provider_type: batch[0]?.provider_type ?? "imap",
-          function_name: batch[0]?.provider_type === "gmail" ? "gmail-sync" : "imap-sync",
+          id: acc.id,
+          provider_type: "gmail",
+          function_name: "gmail-sync",
           ok: false,
           timeout: false,
           duration_ms: 0,
@@ -230,6 +226,35 @@ Deno.serve(async (req) => {
         });
       }
     }
+  }
+
+  for (const acc of imapAccounts) {
+    if (isActiveSync(acc)) {
+      results.push({
+        id: acc.id,
+        provider_type: "imap",
+        function_name: "imap-sync",
+        ok: true,
+        duration_ms: 0,
+        timeout: false,
+        error: "skipped: sync_in_progress",
+      });
+      continue;
+    }
+    if ((acc.imap_last_uid ?? 0) <= 0) {
+      results.push({
+        id: acc.id,
+        provider_type: "imap",
+        function_name: "imap-sync",
+        ok: true,
+        duration_ms: 0,
+        timeout: false,
+        error: "skipped: awaiting_initial_sync",
+      });
+      continue;
+    }
+    const result = await invokeImapSyncLight(baseUrl, serviceRoleKey, acc, perAccountTimeoutMs);
+    results.push(result);
   }
 
   const okCount = results.filter((r) => r.ok).length;
@@ -240,6 +265,7 @@ Deno.serve(async (req) => {
     ok: true,
     processed: results.length,
     batch_size: batchSize,
+    imap_sequential: true,
     per_account_timeout_ms: perAccountTimeoutMs,
     ok_count: okCount,
     failed_count: failedCount,

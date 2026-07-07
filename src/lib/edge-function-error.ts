@@ -1,3 +1,5 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 function isGenericInvokeMessage(msg: string): boolean {
   return /edge function returned a non-2xx status code|non-2xx status/i.test(msg);
 }
@@ -41,9 +43,20 @@ function extractFromErrorContext(error: unknown): string | null {
   return null;
 }
 
+async function readResponseBody(error: unknown): Promise<string | null> {
+  if (!error || typeof error !== "object") return null;
+  const ctx = (error as { context?: unknown }).context;
+  if (!(ctx instanceof Response)) return null;
+  try {
+    return errorFromJsonString(await ctx.text());
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Supabase `functions.invoke` often sets a generic error for non-2xx while the real
- * message lives in the JSON body (`{ error: "..." }`) on `data` or in `error.context.body`.
+ * message lives in the JSON body (`{ error: "..." }`) on `data` or in `error.context`.
  */
 export function parseEdgeFunctionFailure(data: unknown, error: unknown): string {
   const fromData = extractFromData(data);
@@ -58,4 +71,48 @@ export function parseEdgeFunctionFailure(data: unknown, error: unknown): string 
   }
   if (error instanceof Error && !isGenericInvokeMessage(error.message)) return error.message;
   return "Request failed (open DevTools → Network → failed request → Response for details).";
+}
+
+/** Like parseEdgeFunctionFailure but reads `error.context` when it is a fetch Response. */
+export async function parseEdgeFunctionFailureAsync(data: unknown, error: unknown): Promise<string> {
+  const sync = parseEdgeFunctionFailure(data, error);
+  if (!/Request failed \(open DevTools/i.test(sync)) return sync;
+  const fromResponse = await readResponseBody(error);
+  if (fromResponse) return fromResponse;
+  return sync;
+}
+
+/** Invoke an edge function and throw with the server JSON `error` field on failure. */
+export async function invokeEdgeFunction<T extends Record<string, unknown>>(
+  supabase: SupabaseClient,
+  functionName: string,
+  body: Record<string, unknown>,
+  options?: { headers?: Record<string, string>; timeoutMs?: number },
+): Promise<T> {
+  const timeoutMs = options?.timeoutMs ?? 35_000;
+  const invokePromise = supabase.functions.invoke(functionName, {
+    body,
+    headers: options?.headers,
+  });
+
+  const { data, error } = await Promise.race([
+    invokePromise,
+    new Promise<{ data: null; error: Error }>((resolve) => {
+      window.setTimeout(
+        () => resolve({ data: null, error: new Error(`${functionName} timed out after ${timeoutMs}ms`) }),
+        timeoutMs,
+      );
+    }),
+  ]);
+
+  if (error) {
+    const detail = await parseEdgeFunctionFailureAsync(data, error);
+    throw new Error(detail);
+  }
+
+  if (data && typeof data === "object" && (data as { ok?: boolean }).ok === false) {
+    throw new Error(extractFromData(data) ?? "Request failed");
+  }
+
+  return data as T;
 }

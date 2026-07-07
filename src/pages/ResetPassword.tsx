@@ -265,7 +265,7 @@ export default function ResetPassword() {
         <p className="text-center mt-6">
           <Link
             to="/auth"
-            className="inline-flex items-center justify-center rounded-md border border-border/70 bg-muted/50 px-3 py-1.5 text-sm font-medium text-primary transition-colors hover:border-primary/40 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            className="inline-flex items-center justify-center rounded-md border border-border/70 bg-muted/50 px-3 py-1.5 text-sm font-medium text-primary transition-colors hover:border-primary/40 hover:bg-primary/10 focus-visible:outline-none focus-visible:border-ring"
           >
             Back to sign in
           </Link>

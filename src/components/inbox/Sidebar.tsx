@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { Inbox, Send, Star, Archive, Trash2, FileEdit, Plus, LogOut, Menu, Settings, Bell, AlertCircle, BookUser, ChevronDown } from "lucide-react";
 import { InstallAppSidebar } from "@/components/InstallAppBanner";
@@ -11,6 +11,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { AccountSettingsDialog } from "./AccountSettingsDialog";
+import { deleteEmailAccount } from "@/lib/delete-email-account";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { usePushNotifications } from "@/hooks/usePushNotifications";
@@ -54,6 +55,8 @@ interface Props {
   accounts: Account[];
   unreadByAccount: Record<string, number>;
   totalUnread: number;
+  /** When true, the Contacts link is highlighted (e.g. on /contacts). */
+  contactsActive?: boolean;
 }
 
 const navItems = [
@@ -65,8 +68,9 @@ const navItems = [
   { id: "trash", label: "Trash", icon: Trash2 },
 ];
 
-export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeNav, onChangeNav, onAddAccount, accounts, unreadByAccount, totalUnread, onRefresh }: Props & { onRefresh: () => void }) {
+export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeNav, onChangeNav, onAddAccount, accounts, unreadByAccount, totalUnread, contactsActive = false, onRefresh }: Props & { onRefresh: () => void }) {
   const { user, signOut } = useAuth();
+  const navigate = useNavigate();
   const push = usePushNotifications(user?.id);
   const outboxCount = useOutboxCount();
   const [editAccount, setEditAccount] = useState<Account | null>(null);
@@ -100,15 +104,7 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
   const avatarInitial = (primaryName[0] ?? userEmail[0] ?? "U").toUpperCase();
 
   const deleteAccount = async (acc: Account) => {
-    // Cascade-delete emails + threads first (no FK cascade in schema)
-    await supabase.from("emails").delete().eq("account_id", acc.id);
-    await supabase.from("email_threads").delete().eq("account_id", acc.id);
-    const { error } = await supabase.from("email_accounts").delete().eq("id", acc.id);
-    if (error) {
-      toast.error(`Failed to remove: ${error.message}`);
-      return;
-    }
-    toast.success(`Removed ${acc.email_address}`);
+    await deleteEmailAccount(supabase, acc.id);
     if (selectedAccountId === acc.id) onSelectAccount(null);
     onRefresh();
   };
@@ -132,7 +128,15 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
         <Button onClick={onCompose} className="w-full justify-start gap-2 shadow-sm" size="lg">
           <Plus className="size-4" /> Compose
         </Button>
-        <Button variant="outline" className="w-full justify-start gap-2" size="sm" asChild>
+        <Button
+          variant={contactsActive ? "secondary" : "outline"}
+          className={cn(
+            "w-full justify-start gap-2",
+            contactsActive && "bg-sidebar-accent text-sidebar-accent-foreground font-medium",
+          )}
+          size="sm"
+          asChild
+        >
           <Link to="/contacts">
             <BookUser className="size-4" /> Contacts
           </Link>
@@ -150,11 +154,17 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
       <nav className="flex-1 min-h-0 overflow-y-auto px-2 space-y-0.5">
         {navItems.map(item => {
           const Icon = item.icon;
-          const active = activeNav === item.id;
+          const active = !contactsActive && activeNav === item.id;
           return (
             <button
               key={item.id}
-              onClick={() => onChangeNav(item.id as "inbox" | "drafts" | "starred" | "sent" | "archive" | "trash")}
+              onClick={() => {
+                if (contactsActive) {
+                  navigate("/");
+                  return;
+                }
+                onChangeNav(item.id as "inbox" | "drafts" | "starred" | "sent" | "archive" | "trash");
+              }}
               className={cn(
                 "w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors",
                 active
@@ -271,18 +281,42 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
         </div>
 
       {push.supported && (
-        <div className="px-3 py-2 border-t border-sidebar-border">
+        <div
+          className={cn(
+            "px-3 py-2.5 border-t border-sidebar-border transition-colors",
+            push.enabled && "bg-primary/10",
+          )}
+        >
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <Bell className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-              <Label htmlFor="push-notify" className="text-xs font-medium cursor-pointer leading-tight">
-                New mail alerts
-              </Label>
-            </div>
+            <Label htmlFor="push-notify" className="flex items-center gap-2 min-w-0 cursor-pointer">
+              <Bell
+                className={cn(
+                  "size-3.5 shrink-0 transition-colors",
+                  push.enabled ? "text-primary" : "text-muted-foreground",
+                )}
+                aria-hidden
+                fill={push.enabled ? "currentColor" : "none"}
+              />
+              <span className="text-xs font-medium leading-tight">New mail alerts</span>
+              <Badge
+                variant={push.enabled ? "default" : "secondary"}
+                className={cn(
+                  "h-4 px-1.5 text-[10px] font-semibold uppercase tracking-wide",
+                  !push.enabled && "bg-muted text-muted-foreground",
+                )}
+              >
+                {push.busy ? "…" : push.enabled ? "On" : "Off"}
+              </Badge>
+            </Label>
             <Switch
               id="push-notify"
               checked={push.enabled}
               disabled={push.busy}
+              aria-label={push.enabled ? "Turn off new mail alerts" : "Turn on new mail alerts"}
+              className={cn(
+                "data-[state=checked]:bg-primary",
+                !push.enabled && "data-[state=unchecked]:bg-muted-foreground/30",
+              )}
               onCheckedChange={async (v) => {
                 try {
                   await push.setNotificationsOn(v);
@@ -293,9 +327,6 @@ export function Sidebar({ selectedAccountId, onSelectAccount, onCompose, activeN
               }}
             />
           </div>
-          <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
-            Alerts when sync imports new messages (enable after installing the app for best results).
-          </p>
         </div>
       )}
 

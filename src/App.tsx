@@ -1,6 +1,6 @@
 import * as Sentry from "@sentry/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Outlet, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -15,6 +15,7 @@ import TermsOfService from "./pages/TermsOfService.tsx";
 import Contacts from "./pages/Contacts.tsx";
 import ResetPassword from "./pages/ResetPassword.tsx";
 import AuthConfirmed from "./pages/AuthConfirmed.tsx";
+import Control from "./pages/Control.tsx";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -42,12 +43,15 @@ function AppRoutes() {
     <Routes>
       <Route path="/privacy" element={<PrivacyPolicy />} />
       <Route path="/terms" element={<TermsOfService />} />
+      <Route path="/control" element={<Control />} />
+      <Route path="/admin" element={<Navigate to="/control" replace />} />
       <Route element={<AppShell />}>
         <Route index element={<Index />} />
         <Route path="auth" element={<Auth />} />
         <Route path="auth/reset-password" element={<ResetPassword />} />
         <Route path="auth/confirmed" element={<AuthConfirmed />} />
         <Route path="contacts" element={<Contacts />} />
+        <Route path="contact" element={<Navigate to="/contacts" replace />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

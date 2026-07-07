@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
@@ -12,13 +12,14 @@ import { fetchEmailAccounts, fetchEnrichedThreads, type EmailAccountRow } from "
 import { formatGmailLabelId } from "@/lib/gmail-labels";
 import { useForegroundMailboxSync } from "@/hooks/useForegroundMailboxSync";
 import { useAppUnreadBadge } from "@/hooks/useAppUnreadBadge";
+import { toast } from "sonner";
 
 type Account = EmailAccountRow;
 
 type MailboxView = "inbox" | "drafts" | "starred" | "sent" | "archive" | "trash";
 
 const Index = () => {
-  const { session, user, loading: authLoading } = useAuth();
+  const { session, user, loading: authLoading, isAdmin, hasActiveAccess, accessLoading } = useAuth();
   const queryClient = useQueryClient();
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
@@ -77,7 +78,7 @@ const Index = () => {
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
         void queryClient.invalidateQueries({ queryKey: ["inbox-threads", user.id] });
-      }, 750);
+      }, 400);
     };
 
     const channel = supabase
@@ -85,12 +86,46 @@ const Index = () => {
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "emails", filter: `user_id=eq.${user.id}` },
-        schedule,
+        (payload) => {
+          // #region agent log
+          fetch("http://127.0.0.1:7618/ingest/5e429cc6-9e4d-4191-8a07-7d3d98cdf51b", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e779de" },
+            body: JSON.stringify({
+              sessionId: "e779de",
+              runId: "post-fix",
+              hypothesisId: "H6",
+              location: "Index.tsx:realtime",
+              message: "emails_change",
+              data: { event: payload.eventType, table: payload.table },
+              timestamp: Date.now(),
+            }),
+          }).catch(() => {});
+          // #endregion
+          schedule();
+        },
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "email_threads", filter: `user_id=eq.${user.id}` },
-        schedule,
+        (payload) => {
+          // #region agent log
+          fetch("http://127.0.0.1:7618/ingest/5e429cc6-9e4d-4191-8a07-7d3d98cdf51b", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e779de" },
+            body: JSON.stringify({
+              sessionId: "e779de",
+              runId: "post-fix",
+              hypothesisId: "H6",
+              location: "Index.tsx:realtime",
+              message: "threads_change",
+              data: { event: payload.eventType, table: payload.table },
+              timestamp: Date.now(),
+            }),
+          }).catch(() => {});
+          // #endregion
+          schedule();
+        },
       )
       .on(
         "postgres_changes",
@@ -100,7 +135,23 @@ const Index = () => {
           schedule();
         },
       )
-      .subscribe();
+      .subscribe((status) => {
+        // #region agent log
+        fetch("http://127.0.0.1:7618/ingest/5e429cc6-9e4d-4191-8a07-7d3d98cdf51b", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e779de" },
+          body: JSON.stringify({
+            sessionId: "e779de",
+            runId: "post-fix",
+            hypothesisId: "H6",
+            location: "Index.tsx:realtime",
+            message: "channel_status",
+            data: { status },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+        // #endregion
+      });
 
     return () => {
       if (debounce) clearTimeout(debounce);
@@ -169,16 +220,68 @@ const Index = () => {
     [threads],
   );
 
-  const { runSync } = useForegroundMailboxSync(user?.id, accounts, accountIdsKey);
+  const priorityAccountId = useMemo(() => {
+    if (selectedAccountId) return selectedAccountId;
+    if (selectedThreadId) {
+      return threads.find((t) => t.id === selectedThreadId)?.account_id ?? null;
+    }
+    // "All inboxes" with one mailbox still needs fast polling — no explicit sidebar click required.
+    if (accounts.length === 1) return accounts[0].id;
+    return null;
+  }, [selectedAccountId, selectedThreadId, threads, accounts]);
+
+  const { runSync, syncing, scheduleInboundChecks } = useForegroundMailboxSync(
+    user?.id,
+    accounts,
+    accountIdsKey,
+    priorityAccountId,
+  );
   const prevAccountCountRef = useRef(0);
+
+  const refreshInbox = useCallback(async () => {
+    const syncAccountId =
+      selectedAccountId ?? (accounts.length === 1 ? accounts[0].id : null);
+    // #region agent log
+    fetch("http://127.0.0.1:7618/ingest/5e429cc6-9e4d-4191-8a07-7d3d98cdf51b", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e779de" },
+      body: JSON.stringify({
+        sessionId: "e779de",
+        runId: "post-fix",
+        hypothesisId: "H4",
+        location: "Index.tsx:refreshInbox",
+        message: "user_manual_refresh",
+        data: {
+          syncAccountId,
+          accountCount: accounts.length,
+          selectedAccountId,
+          providers: accounts.map((a) => a.provider_type),
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+    const { imported } = await runSync({
+      force: true,
+      userInitiated: true,
+      accountId: syncAccountId,
+    });
+    await refetchThreads();
+    if (imported > 0) {
+      toast.success(`Imported ${imported} new message${imported === 1 ? "" : "s"}`);
+    }
+  }, [runSync, selectedAccountId, accounts, refetchThreads]);
 
   useEffect(() => {
     if (!user?.id || accounts.length === 0) return;
     if (accounts.length > prevAccountCountRef.current) {
-      void runSync({ force: true });
+      const id = accounts.length === 1 ? accounts[0].id : undefined;
+      void runSync(
+        id ? { force: true, accountId: id } : { force: true },
+      );
     }
     prevAccountCountRef.current = accounts.length;
-  }, [accounts.length, user?.id, runSync]);
+  }, [accounts.length, user?.id, runSync, accounts]);
 
   useAppUnreadBadge(totalUnread);
 
@@ -199,11 +302,23 @@ const Index = () => {
               ? "Drafts"
               : "All inboxes";
 
-  if (authLoading) return <div className="min-h-screen grid place-items-center text-sm text-muted-foreground">Loading…</div>;
+  if (authLoading || accessLoading) return <div className="min-h-screen grid place-items-center text-sm text-muted-foreground">Loading…</div>;
   if (!session) {
     return (
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden max-md:min-h-0">
         <LandingHero />
+      </div>
+    );
+  }
+  if (!hasActiveAccess && !isAdmin) {
+    return (
+      <div className="min-h-screen grid place-items-center p-6 text-center">
+        <div className="max-w-md space-y-3">
+          <h1 className="text-lg font-semibold">Access expired</h1>
+          <p className="text-sm text-muted-foreground">
+            Your access has expired. Contact your administrator to restore access.
+          </p>
+        </div>
       </div>
     );
   }
@@ -269,7 +384,8 @@ const Index = () => {
             setSelectedThreadId(id);
           }}
           loading={loading}
-          onRefresh={() => void refetchThreads()}
+          refreshing={syncing}
+          onRefresh={() => void refreshInbox()}
           filterUnread={filterUnread}
           onToggleUnread={() => setFilterUnread((v) => !v)}
           title={title}
@@ -286,6 +402,7 @@ const Index = () => {
           thread={selectedThread ?? null}
           account={selectedAccount as Account | null}
           onAfterAction={invalidateInbox}
+          onAfterSend={scheduleInboundChecks}
           onBack={() => setSelectedThreadId(null)}
         />
       </div>
@@ -310,9 +427,10 @@ const Index = () => {
         onDraftSaved={async () => {
           await queryClient.invalidateQueries({ queryKey: ["inbox-threads", user?.id] });
         }}
-        onSent={async () => {
+        onSent={async (accountId) => {
           setComposeDraftThreadId(null);
           await queryClient.invalidateQueries({ queryKey: ["inbox-threads", user?.id] });
+          if (accountId) scheduleInboundChecks(accountId);
         }}
       />
     </div>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { InboxAppLayout } from "@/components/inbox/InboxAppLayout";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,7 +34,7 @@ type ContactRow = {
 const emailOk = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 
 export default function Contacts() {
-  const { user, session, loading: authLoading } = useAuth();
+  const { user } = useAuth();
   const isMobile = useIsMobile();
   const [rows, setRows] = useState<ContactRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -146,35 +146,16 @@ export default function Contacts() {
     }
   };
 
-  if (authLoading) {
-    return <div className="min-h-screen grid place-items-center text-sm text-muted-foreground">Loading…</div>;
-  }
-  if (!session) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-4 p-6">
-        <p className="text-sm text-muted-foreground">Sign in to manage contacts.</p>
-        <Button asChild>
-          <Link to="/auth">Sign in</Link>
-        </Button>
-      </div>
-    );
-  }
-
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-      <header className="border-b border-border px-4 md:px-6 py-3 md:py-4 flex items-start justify-between gap-3 shrink-0">
+    <InboxAppLayout contactsActive>
+      <header className="border-b border-border px-4 md:px-6 py-3 md:py-4 flex items-start justify-between gap-3 shrink-0 max-md:pl-14">
         <div className="min-w-0">
           <h1 className="text-lg md:text-xl font-semibold tracking-tight">Contacts</h1>
           <p className="text-xs md:text-sm text-muted-foreground mt-0.5">Saved addresses for compose and reference.</p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Button type="button" size="sm" className="gap-1.5" onClick={openNew}>
-            <Plus className="size-4" /> Add
-          </Button>
-          <Button variant="outline" size="sm" asChild>
-            <Link to="/">Back to inbox</Link>
-          </Button>
-        </div>
+        <Button type="button" size="sm" className="gap-1.5 shrink-0" onClick={openNew}>
+          <Plus className="size-4" /> Add
+        </Button>
       </header>
 
       <div className="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6">
@@ -274,6 +255,6 @@ export default function Contacts() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </InboxAppLayout>
   );
 }

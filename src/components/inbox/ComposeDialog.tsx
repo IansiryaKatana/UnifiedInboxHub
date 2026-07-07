@@ -26,7 +26,7 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   accounts: Account[];
-  onSent: () => Promise<void> | void;
+  onSent: (accountId: string) => Promise<void> | void;
   /** When set, loads and updates this draft thread */
   draftThreadId?: string | null;
   onDraftSaved?: () => void | Promise<void>;
@@ -441,7 +441,7 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent, draftThrea
       if (typeof navigator !== "undefined" && !navigator.onLine) {
         enqueueOutboxSend({ fnName, body: invokeBody });
         toast.info("You are offline — message queued. It will send when you reconnect.");
-        await onSent();
+        await onSent(selectedAccount.id);
         onOpenChange(false);
         resetForm();
         return;
@@ -455,7 +455,7 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent, draftThrea
         if (shouldQueueSendFailure({ error: errObj, responseCode: res?.code })) {
           enqueueOutboxSend({ fnName, body: invokeBody });
           toast.info("Could not reach the server — message queued to send later.");
-          await onSent();
+          await onSent(selectedAccount.id);
           onOpenChange(false);
           resetForm();
           return;
@@ -470,7 +470,7 @@ export function ComposeDialog({ open, onOpenChange, accounts, onSent, draftThrea
       }
 
       toast.success(`Sent from ${selectedAccount.email_address}`);
-      await onSent();
+      await onSent(selectedAccount.id);
       onOpenChange(false);
       resetForm();
     } catch (err) {

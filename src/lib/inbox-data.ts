@@ -21,13 +21,13 @@ export async function fetchEmailAccounts(userId: string): Promise<EmailAccountRo
     .eq("user_id", userId)
     .order("created_at", { ascending: true });
   if (error) throw error;
-  return (data ?? []) as EmailAccountRow[];
+  return (data ?? []).filter((a) => a.sync_status !== "disconnected") as EmailAccountRow[];
 }
 
 /** Loads threads + latest sender / starred / sent flags (same logic as legacy loadThreads). */
 export async function fetchEnrichedThreads(): Promise<ThreadRow[]> {
   const { data, error } = await supabase.rpc("get_inbox_threads_enriched", {
-    p_limit: 1000,
+    p_limit: 500,
     p_offset: 0,
   });
   if (error) {

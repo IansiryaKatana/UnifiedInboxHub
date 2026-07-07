@@ -4,7 +4,13 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { notifyNewInboundEmail } from "../_shared/push-notify.ts";
 import { normalizeMailboxPassword } from "../_shared/mail-credentials.ts";
 import { normalizeMessageId } from "../_shared/rfc-mail.ts";
-import { ImapFlow } from "npm:imapflow@1.0.165";
+import {
+  connectImapWithFallbacks,
+  CONNECT_BUDGET_MS,
+  INCREMENTAL_CONNECT_BUDGET_MS,
+  isHostingerFamilyHost,
+  smtpHostForImapHost,
+} from "../_shared/imap-connect.ts";
 import { simpleParser } from "npm:mailparser@3.7.1";
 import { Buffer } from "node:buffer";
 
@@ -25,147 +31,16 @@ interface SyncedAttachment {
   content_id: string | null;
   data_base64: string | null;
 }
-interface ImapAttempt {
-  host: string;
-  port: number;
-  secure: boolean;
-  label: string;
-}
-
-/** Default per-attempt connect budget (Gmail is fast from edge). */
-const IMAP_CONNECT_MS = 12_000;
-/** Hostinger/Titan/Yahoo can be slow from edge — allow one longer SSL attempt. */
-const IMAP_CONNECT_SLOW_MS = 22_000;
+const FIRST_SYNC_CAP = 12;
 /** Stop importing before the edge gateway hard-kills the isolate (~150s). */
-const SYNC_BUDGET_MS = 50_000;
-const FIRST_SYNC_CAP = 25;
-
-const SSL_ONLY_IMAP_HOSTS = new Set([
-  "imap.gmail.com",
-  "imap.googlemail.com",
-  "imap.hostinger.com",
-  "imap.titan.email",
-  "imap.mail.yahoo.com",
-  "imap.mail.yahoo.co.uk",
-  "outlook.office365.com",
-]);
-
-function normalizedImapHost(host: string): string {
-  return host.trim().toLowerCase();
-}
-
-function isSslOnlyImapHost(host: string): boolean {
-  const h = normalizedImapHost(host);
-  if (SSL_ONLY_IMAP_HOSTS.has(h)) return true;
-  return h.includes("yahoo") || h.includes("gmail");
-}
-
-function imapConnectTimeoutMs(host: string): number {
-  const h = normalizedImapHost(host);
-  if (h.includes("yahoo") || h.includes("hostinger") || h.includes("titan")) return IMAP_CONNECT_SLOW_MS;
-  return IMAP_CONNECT_MS;
-}
-
-function buildImapAttempts(
-  host: string,
-  configuredPort: number,
-  configuredSecure: boolean,
-): ImapAttempt[] {
-  const attempts: ImapAttempt[] = [];
-  const seen = new Set<string>();
-  const add = (h: string, port: number, secure: boolean, label: string) => {
-    const key = `${h.toLowerCase()}:${port}:${secure}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    attempts.push({ host: h, port, secure, label });
-  };
-
-  add(host, configuredPort, configuredSecure, "configured");
-
-  const normalizedHost = normalizedImapHost(host);
-  const sslOnly = isSslOnlyImapHost(host);
-
-  if (!sslOnly && configuredPort === 993 && configuredSecure) {
-    add(host, 143, false, "fallback-starttls-143");
-  } else if (!sslOnly && configuredPort === 143 && !configuredSecure) {
-    add(host, 993, true, "fallback-ssl-993");
-  }
-
-  // Hostinger vs Titan — also try EU cluster hosts for UK/EU mailboxes.
-  if (normalizedHost === "imap.hostinger.com") {
-    add("imap.titan.email", 993, true, "titan-ssl-993");
-  } else if (normalizedHost === "imap.titan.email") {
-    add("imap0101.titan.email", 993, true, "titan-eu-ssl-993");
-    add("imap.hostinger.com", 993, true, "hostinger-ssl-993");
-  } else if (normalizedHost === "imap0101.titan.email") {
-    add("imap.titan.email", 993, true, "titan-global-ssl-993");
-    add("imap.hostinger.com", 993, true, "hostinger-ssl-993");
-  }
-
-  return attempts;
-}
-
-function isHostingerFamilyHost(host: string): boolean {
-  const h = normalizedImapHost(host);
-  return h.includes("hostinger") || h.includes("titan");
-}
-
-function createImapClient(
-  attempt: ImapAttempt,
-  username: string,
-  password: string,
-  loginMethod?: "LOGIN" | "PLAIN",
-): ImapFlow {
-  const connectMs = imapConnectTimeoutMs(attempt.host);
-  const hostingerFamily = isHostingerFamilyHost(attempt.host);
-  const auth: { user: string; pass: string; loginMethod?: "LOGIN" | "PLAIN" } = {
-    user: username,
-    pass: password,
-  };
-  if (loginMethod) auth.loginMethod = loginMethod;
-
-  return new ImapFlow({
-    host: attempt.host,
-    port: attempt.port,
-    secure: attempt.secure,
-    auth,
-    logger: false,
-    disableCompression: hostingerFamily,
-    connectionTimeout: connectMs,
-    greetingTimeout: connectMs,
-    socketTimeout: Math.max(connectMs + 15_000, 35_000),
-    tls: attempt.secure ? { servername: attempt.host, minVersion: "TLSv1.2" } : undefined,
-  });
-}
-
-async function connectImapAttempt(
-  attempt: ImapAttempt,
-  username: string,
-  password: string,
-): Promise<ImapFlow> {
-  const authMethods: Array<"PLAIN" | "LOGIN" | undefined> = isHostingerFamilyHost(attempt.host)
-    ? [undefined, "LOGIN", "PLAIN"]
-    : [undefined];
-  let lastError = "";
-  for (const loginMethod of authMethods) {
-    let client: ImapFlow | null = null;
-    try {
-      client = createImapClient(attempt, username, password, loginMethod);
-      await client.connect();
-      return client;
-    } catch (err) {
-      try { await client?.logout(); } catch { /* ignore */ }
-      lastError = err instanceof Error ? err.message : String(err);
-    }
-  }
-  throw new Error(lastError || "Unable to connect");
-}
-
-function smtpHostForImapHost(imapHost: string): string {
-  const h = imapHost.trim().toLowerCase();
-  if (h.startsWith("imap0101.")) return imapHost.replace(/^imap0101\./i, "smtp0101.");
-  return imapHost.replace(/^imap\./i, "smtp.");
-}
+const SYNC_BUDGET_MS = 18_000;
+const INCREMENTAL_SYNC_BUDGET_MS = 12_000;
+/** Hard wall clock for a single edge invocation (gateway kills ~150s). */
+const WALL_BUDGET_MS = 25_000;
+/** Absolute cap — return partial OK before Supabase gateway timeout. */
+const GATEWAY_HARD_MS = 28_000;
+const PER_MESSAGE_DOWNLOAD_MS = 8_000;
+const HOSTINGER_DOWNLOAD_MS = 22_000;
 
 function decryptPassword(encrypted: string): string {
   // Stored using base64 of XOR with project secret. Safe enough for v1; tighten with pgsodium later.
@@ -294,10 +169,17 @@ async function handleImapSync(req: Request): Promise<Response> {
     if (!userId) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     const user = { id: userId };
 
+    const wallStartedAt = Date.now();
+    const wallDeadlineAt = wallStartedAt + WALL_BUDGET_MS;
+
     const body = await req.json().catch(() => ({}));
     const account_id: string | undefined = body.account_id;
     const max_messages = body.max_messages;
     const resume_first_sync = body.resume_first_sync === true;
+    const incremental_only = body.incremental_only === true;
+    const backfill_older = body.backfill_older === true;
+    const force_sync = body.force_sync === true;
+    const backfill_seq_to = typeof body.backfill_seq_to === "number" ? body.backfill_seq_to : undefined;
     accountIdForError = account_id;
     if (!account_id) return new Response(JSON.stringify({ error: "account_id required" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
@@ -308,14 +190,23 @@ async function handleImapSync(req: Request): Promise<Response> {
     if (!account.imap_host || !account.imap_username || !account.imap_password_encrypted) {
       return new Response(JSON.stringify({ error: "IMAP credentials missing" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
+    if (account.sync_status === "disconnected") {
+      return new Response(JSON.stringify({ ok: true, imported: 0, skipped: true, reason: "account_disconnected" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
-    if (account.sync_status === "syncing" && account.updated_at) {
+    if (account.sync_status === "syncing" && account.updated_at && !force_sync) {
       const age = Date.now() - new Date(account.updated_at).getTime();
       if (age < STALE_SYNC_MS) {
         return new Response(JSON.stringify({ ok: true, imported: 0, skipped: true, reason: "sync_in_progress" }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+    }
+
+    if (force_sync && account.sync_status === "syncing") {
+      await supabaseAdmin.from("email_accounts").update({ sync_status: "idle" }).eq("id", account_id);
     }
 
     await supabaseAdmin.from("email_accounts").update({ sync_status: "syncing", last_sync_error: null }).eq("id", account_id);
@@ -348,20 +239,37 @@ async function handleImapSync(req: Request): Promise<Response> {
         await supabaseAdmin.from("email_accounts").update({ imap_last_uid: null }).eq("id", account_id);
       }
     }
+    const isIncrementalPoll = incremental_only && priorUid > 0;
+
+    if (incremental_only && priorUid === 0) {
+      return new Response(JSON.stringify({
+        ok: true,
+        imported: 0,
+        skipped: true,
+        reason: "awaiting_initial_sync",
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     /** Avoid Edge timeouts on first sync; callers can pass max_messages to raise the cap */
     let effectiveMax: number;
-    if (typeof max_messages === "number") {
-      const cap = priorUid === 0 ? 40 : 500;
+    if (isIncrementalPoll) {
+      effectiveMax = Math.max(1, Math.min(typeof max_messages === "number" ? max_messages : 8, 15));
+    } else if (typeof max_messages === "number") {
+      const hostingerCap = isHostingerFamilyHost(host) ? (backfill_older ? 4 : 8) : 500;
+      const cap = priorUid === 0 ? Math.min(15, hostingerCap) : hostingerCap;
       effectiveMax = Math.max(1, Math.min(max_messages, cap));
     } else if (priorUid === 0) {
       effectiveMax = FIRST_SYNC_CAP;
     } else {
-      effectiveMax = 80;
+      effectiveMax = 20;
     }
 
-    const attempts = buildImapAttempts(host, configuredPort, configuredSecure);
+    const syncBudgetMs = isIncrementalPoll ? INCREMENTAL_SYNC_BUDGET_MS : SYNC_BUDGET_MS;
+    const connectBudgetMs = isIncrementalPoll ? INCREMENTAL_CONNECT_BUDGET_MS : CONNECT_BUDGET_MS;
 
-    let client: ImapFlow | null = null;
+    let client: import("npm:imapflow@1.0.165").ImapFlow | null = null;
 
     let imported = 0;
     let scanned = 0;
@@ -373,65 +281,31 @@ async function handleImapSync(req: Request): Promise<Response> {
     };
     let partial = false;
     let lastUid = priorUid;
+    let backfillHasMore = false;
+    let nextBackfillSeqTo: number | undefined;
+    let mailboxTotal: number | undefined;
     const forceFirstSync = priorUid === 0 && (account.imap_last_uid ?? 0) > 0;
-    let connected = false;
     let connectedHost = host;
     let connectedPort = configuredPort;
     let connectedSecure = configuredSecure;
 
     try {
-      try {
-        let lastError = "";
-        let tryAlternateHost = true;
-        for (const attempt of attempts) {
-          if (attempt.label !== "configured" && !tryAlternateHost) continue;
-          try {
-            client = await connectImapAttempt(attempt, username, password);
-            connected = true;
-            connectedHost = attempt.host;
-            connectedPort = attempt.port;
-            connectedSecure = attempt.secure;
-            break;
-          } catch (err) {
-            try { await client?.logout(); } catch { /* ignore */ }
-            client = null;
-            lastError = err instanceof Error ? err.message : String(err);
-            const lowerErr = lastError.toLowerCase();
-            tryAlternateHost =
-              lowerErr.includes("establish connection") ||
-              lowerErr.includes("upgrade connection") ||
-              lowerErr.includes("timed out") ||
-              lowerErr.includes("etimedout") ||
-              lowerErr.includes("econnrefused");
-          }
-        }
-        if (!connected || !client) {
-          throw new Error(lastError || "Unable to connect");
-        }
-      } catch (connErr) {
-        const cm = connErr instanceof Error ? connErr.message : String(connErr);
-        const lowerCm = cm.toLowerCase();
-        const isGmail = host.toLowerCase().includes("gmail");
-        let hint = "";
-        if (isGmail && (lowerCm.includes("auth") || lowerCm.includes("invalid credentials") || lowerCm.includes("authentication failed"))) {
-          hint = " Use a 16-character Google App Password (paste with or without spaces). Enable IMAP in Gmail → Settings → Forwarding and POP/IMAP.";
-        } else if (host.toLowerCase().includes("yahoo")) {
-          hint = " Yahoo requires an App Password (Yahoo Account → Security → Generate app password) and IMAP enabled. Use your full @yahoo.com address as username.";
-        } else if (host.toLowerCase().includes("hostinger") || host.toLowerCase().includes("titan")) {
-          if (lowerCm.includes("unexpected close") || lowerCm.includes("auth") || lowerCm.includes("invalid credentials")) {
-            hint = " For Titan: sign in to Titan webmail → Settings (gear) → Enable Titan on other apps, then use your mailbox password. Turn OFF two-factor authentication (2FA blocks IMAP). For Hostinger Email use imap.hostinger.com; for Titan use imap.titan.email — check hPanel → Emails → Connect Apps & Devices.";
-          } else {
-            hint = " Hostinger Email uses imap.hostinger.com; Titan/business mail uses imap.titan.email — check Emails → Connect in your Hostinger panel.";
-          }
-        } else if (lowerCm.includes("unexpected close")) {
-          hint = " The server closed the connection — usually wrong IMAP host for this mailbox or an incorrect password. Confirm the provider preset matches your Hostinger/Titan setup.";
-        } else if (lowerCm.includes("establish connection") || lowerCm.includes("upgrade connection")) {
-          hint = " The mail server did not respond in time from our sync region. Confirm IMAP is enabled and the host/port match your provider settings.";
-        }
-        throw new Error(
-          `IMAP connect failed (${account.imap_host}:${configuredPort}): ${cm}.${hint} Use your full email as username.`,
-        );
-      }
+      const connected = await connectImapWithFallbacks(
+        host,
+        configuredPort,
+        configuredSecure,
+        username,
+        password,
+        {
+          connectBudgetMs,
+          wallDeadlineAt,
+          incrementalOnly: isIncrementalPoll,
+        },
+      );
+      client = connected.client;
+      connectedHost = connected.host;
+      connectedPort = connected.port;
+      connectedSecure = connected.secure;
 
       if (connectedHost !== host || connectedPort !== configuredPort || connectedSecure !== configuredSecure) {
         const smtpHost = smtpHostForImapHost(connectedHost);
@@ -445,26 +319,127 @@ async function handleImapSync(req: Request): Promise<Response> {
       const lock = await client.getMailboxLock("INBOX");
       try {
         const uidFlags = new Map<number, Set<string>>();
+        const uidEnvelopeIds = new Map<number, string | null>();
         let newUids: number[];
 
-        if (lastUid > 0 && !resume_first_sync && !forceFirstSync) {
+        const rememberMsg = (msg: { uid: number; flags?: Set<string> | string[]; envelope?: { messageId?: string } }) => {
+          uidFlags.set(msg.uid, msg.flags ? new Set(msg.flags) : new Set());
+          const mid = msg.envelope?.messageId ? normalizeMessageId(msg.envelope.messageId) : null;
+          uidEnvelopeIds.set(msg.uid, mid);
+        };
+
+        const isAlreadyImported = async (uid: number): Promise<boolean> => {
+          const envelopeMid = uidEnvelopeIds.get(uid) ?? null;
+          if (envelopeMid) {
+            const { data } = await supabaseAdmin
+              .from("emails")
+              .select("id")
+              .eq("account_id", account_id)
+              .eq("rfc_message_id", envelopeMid)
+              .maybeSingle();
+            if (data?.id) return true;
+          }
+          const { data: byProvider } = await supabaseAdmin
+            .from("emails")
+            .select("id")
+            .eq("account_id", account_id)
+            .eq("provider_message_id", `imap-${account_id}-${uid}`)
+            .maybeSingle();
+          return !!byProvider?.id;
+        };
+
+        if (backfill_older && !resume_first_sync && !forceFirstSync) {
+          const status = await client.status("INBOX", { messages: true });
+          const msgCount = status.messages ?? 0;
+          mailboxTotal = msgCount;
+          const seqTo = backfill_seq_to !== undefined
+            ? Math.min(Math.max(1, backfill_seq_to), msgCount)
+            : msgCount;
+          const window = effectiveMax;
+          const seqFrom = Math.max(1, seqTo - window + 1);
           const uids: number[] = [];
-          const range = `${lastUid + 1}:*`;
-          for await (const msg of client.fetch(range, { uid: true, flags: true }, { uid: true })) {
+          for await (const msg of client.fetch(`${seqFrom}:${seqTo}`, { uid: true, flags: true, envelope: true })) {
+            if (Date.now() >= wallDeadlineAt) {
+              partial = true;
+              break;
+            }
+            rememberMsg(msg);
             uids.push(msg.uid);
-            uidFlags.set(msg.uid, msg.flags ? new Set(msg.flags) : new Set());
           }
           newUids = uids.sort((a, b) => a - b);
+          if (seqFrom > 1) {
+            backfillHasMore = true;
+            nextBackfillSeqTo = seqFrom - 1;
+          }
+        } else if (lastUid > 0 && !resume_first_sync && !forceFirstSync) {
+          const uids: number[] = [];
+          const hostingerIncremental = isIncrementalPoll && isHostingerFamilyHost(host);
+
+          if (hostingerIncremental) {
+            // Hostinger UID-range poll can miss new mail — always sweep recent sequence numbers.
+            const status = await client.status("INBOX", { messages: true });
+            const msgCount = status.messages ?? 0;
+            mailboxTotal = msgCount;
+            const seqFrom = Math.max(1, msgCount - 14);
+            for await (const msg of client.fetch(`${seqFrom}:*`, { uid: true, flags: true, envelope: true })) {
+              if (Date.now() >= wallDeadlineAt) {
+                partial = true;
+                break;
+              }
+              if (msg.uid > lastUid) {
+                rememberMsg(msg);
+                uids.push(msg.uid);
+              }
+            }
+            newUids = [...new Set(uids)].sort((a, b) => a - b);
+          } else {
+            const range = `${lastUid + 1}:*`;
+            for await (const msg of client.fetch(range, { uid: true, flags: true, envelope: true }, { uid: true })) {
+              if (Date.now() >= wallDeadlineAt) {
+                partial = true;
+                break;
+              }
+              rememberMsg(msg);
+              uids.push(msg.uid);
+              if (uids.length >= effectiveMax) break;
+            }
+            newUids = uids.sort((a, b) => a - b);
+          }
+
+          // Fallback when primary UID poll found nothing — scan recent sequence numbers.
+          if (isIncrementalPoll && newUids.length === 0) {
+            const status = await client.status("INBOX", { messages: true });
+            const msgCount = status.messages ?? 0;
+            mailboxTotal = msgCount;
+            if (msgCount > 0) {
+              const seqFrom = Math.max(1, msgCount - 9);
+              const catchupUids: number[] = [];
+              for await (const msg of client.fetch(`${seqFrom}:*`, { uid: true, flags: true, envelope: true })) {
+                if (Date.now() >= wallDeadlineAt) break;
+                if (msg.uid > lastUid) {
+                  rememberMsg(msg);
+                  catchupUids.push(msg.uid);
+                }
+              }
+              newUids = [...new Set(catchupUids)].sort((a, b) => a - b).slice(0, effectiveMax);
+            }
+          }
         } else {
           // First sync (or resume): scan only the most recent messages in the mailbox.
           const status = await client.status("INBOX", { messages: true });
           const msgCount = status.messages ?? 0;
-          const recentWindow = Math.min(effectiveMax, priorUid === 0 && !resume_first_sync ? 35 : 100);
+          mailboxTotal = msgCount;
+          const recentWindow = Math.min(effectiveMax, priorUid === 0 && !resume_first_sync ? 12 : 50);
           const seqFrom = Math.max(1, msgCount - recentWindow + 1);
           const uids: number[] = [];
-          for await (const msg of client.fetch(`${seqFrom}:*`, { uid: true, flags: true })) {
+          for await (const msg of client.fetch(`${seqFrom}:*`, { uid: true, flags: true, envelope: true })) {
+            if (Date.now() >= wallDeadlineAt) {
+              partial = true;
+              break;
+            }
+            rememberMsg(msg);
             uids.push(msg.uid);
-            uidFlags.set(msg.uid, msg.flags ? new Set(msg.flags) : new Set());
+            if (uids.length >= effectiveMax) break;
           }
           const resumeFrom = resume_first_sync ? (account.imap_last_uid ?? 0) : 0;
           newUids = uids.sort((a, b) => a - b).filter((uid) => uid > resumeFrom);
@@ -476,28 +451,57 @@ async function handleImapSync(req: Request): Promise<Response> {
         const syncStartedAt = Date.now();
         let processedSinceCheckpoint = 0;
         let lastCheckpointUid = lastUid;
+        let successfulBodyFetches = 0;
 
         const checkpointProgress = async () => {
-          if (lastUid <= lastCheckpointUid) return;
+          if (lastUid <= lastCheckpointUid || successfulBodyFetches === 0) return;
           await supabaseAdmin.from("email_accounts").update({
             imap_last_uid: lastUid,
             last_synced_at: new Date().toISOString(),
           }).eq("id", account_id);
           lastCheckpointUid = lastUid;
           processedSinceCheckpoint = 0;
+          successfulBodyFetches = 0;
         };
 
         for (const uid of toProcess) {
-          if (Date.now() - syncStartedAt > SYNC_BUDGET_MS) {
+          if (Date.now() - syncStartedAt > syncBudgetMs || Date.now() >= wallDeadlineAt) {
             partial = true;
             break;
           }
           try {
+          if (await isAlreadyImported(uid)) {
+            if (uid > lastUid) lastUid = uid;
+            processedSinceCheckpoint++;
+            if (processedSinceCheckpoint >= 3) await checkpointProgress();
+            continue;
+          }
           const flagSet = uidFlags.get(uid);
           const seenOnServer = isImapSeen(flagSet);
-          const { content } = await client.download(uid.toString(), undefined, { uid: true });
+          if (Date.now() >= wallDeadlineAt) {
+            partial = true;
+            break;
+          }
+          const downloadBudgetMs = isHostingerFamilyHost(host)
+            ? Math.min(HOSTINGER_DOWNLOAD_MS, Math.max(5_000, wallDeadlineAt - Date.now() - 1_500))
+            : Math.min(PER_MESSAGE_DOWNLOAD_MS, Math.max(3_000, wallDeadlineAt - Date.now() - 1_500));
+          const { content } = await Promise.race([
+            client.download(uid.toString(), undefined, { uid: true }),
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error("message download timed out")), downloadBudgetMs);
+            }),
+          ]);
           const chunks: Uint8Array[] = [];
-          for await (const chunk of content) chunks.push(chunk);
+          let downloadTimedOut = false;
+          for await (const chunk of content) {
+            if (Date.now() >= wallDeadlineAt) {
+              partial = true;
+              downloadTimedOut = true;
+              break;
+            }
+            chunks.push(chunk);
+          }
+          if (downloadTimedOut) break;
           const buffer = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
           let off = 0;
           for (const c of chunks) { buffer.set(c, off); off += c.length; }
@@ -506,6 +510,7 @@ async function handleImapSync(req: Request): Promise<Response> {
             noteFailure("empty message body");
             continue;
           }
+          successfulBodyFetches += 1;
           const parsed = await simpleParser(Buffer.from(buffer));
 
           const fromAddr = parsed.from?.value?.[0];
@@ -691,9 +696,11 @@ async function handleImapSync(req: Request): Promise<Response> {
             const m = msgErr instanceof Error ? msgErr.message : String(msgErr);
             console.error(`imap-sync uid ${uid} failed:`, m);
             noteFailure(m);
+            if (/download timed out/i.test(m)) partial = true;
           }
         }
         if (partial) await checkpointProgress();
+        if (backfill_older && backfillHasMore && !partial) partial = true;
       } finally {
         try {
           lock.release();
@@ -702,10 +709,10 @@ async function handleImapSync(req: Request): Promise<Response> {
         }
       }
     } finally {
-      if (connected) await client?.logout().catch(() => {});
+      if (client) await client.logout().catch(() => {});
     }
 
-    const syncError = imported === 0 && scanned > 0
+    const syncError = !partial && imported === 0 && scanned > 0
       ? (firstFailure
         ? `Imported 0/${scanned} messages. ${firstFailure}`
         : `Scanned ${scanned} messages but none were imported (empty or unparseable).`)
@@ -730,6 +737,9 @@ async function handleImapSync(req: Request): Promise<Response> {
       first_failure: firstFailure,
       partial,
       resume_first_sync: partial && (priorUid === 0 || resume_first_sync),
+      backfill_has_more: backfillHasMore,
+      backfill_seq_to: nextBackfillSeqTo,
+      mailbox_total: mailboxTotal && mailboxTotal > 0 ? mailboxTotal : undefined,
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
@@ -758,14 +768,31 @@ async function handleImapSync(req: Request): Promise<Response> {
 }
 
 Deno.serve(async (req) => {
-  try {
-    return await handleImapSync(req);
-  } catch (e) {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+  const startedAt = Date.now();
+  const handler = handleImapSync(req).catch((e) => {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("imap-sync uncaught:", msg);
     return new Response(JSON.stringify({ ok: false, error: msg }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  }
+  });
+  const hardTimeout = new Promise<Response>((resolve) => {
+    setTimeout(() => {
+      console.warn(`imap-sync gateway_wall at ${Date.now() - startedAt}ms`);
+      resolve(new Response(JSON.stringify({
+        ok: true,
+        imported: 0,
+        partial: true,
+        reason: "gateway_wall",
+      }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      }));
+    }, GATEWAY_HARD_MS);
+  });
+  return await Promise.race([handler, hardTimeout]);
 });

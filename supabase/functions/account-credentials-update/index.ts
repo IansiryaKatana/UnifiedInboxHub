@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { normalizeMailboxPassword } from "../_shared/mail-credentials.ts";
+import { testImapConnection } from "../_shared/imap-connect.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -13,6 +14,20 @@ function encryptPassword(plain: string): string {
     out += String.fromCharCode(plain.charCodeAt(i) ^ key.charCodeAt(i % key.length));
   }
   return btoa(out);
+}
+
+function decryptPassword(encrypted: string): string {
+  const key = Deno.env.get("IMAP_SECRET_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  try {
+    const bin = atob(encrypted);
+    let out = "";
+    for (let i = 0; i < bin.length; i++) {
+      out += String.fromCharCode(bin.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+    }
+    return out;
+  } catch {
+    return "";
+  }
 }
 
 Deno.serve(async (req) => {
@@ -64,6 +79,8 @@ Deno.serve(async (req) => {
     }
 
     const updates: Record<string, unknown> = {};
+    let passwordChanged = false;
+    let newPassword = "";
 
     if (typeof body.email_address === "string" && body.email_address.trim()) updates.email_address = body.email_address.trim();
     if (typeof body.display_name === "string") updates.display_name = body.display_name.trim() || null;
@@ -81,6 +98,8 @@ Deno.serve(async (req) => {
       if (typeof body.imap_password === "string" && body.imap_password.length > 0) {
         const normalized = normalizeMailboxPassword(body.imap_password);
         updates.imap_password_encrypted = encryptPassword(normalized);
+        newPassword = normalized;
+        passwordChanged = true;
         if (typeof body.smtp_password !== "string" || body.smtp_password.length === 0) {
           updates.smtp_password_encrypted = encryptPassword(normalized);
         }
@@ -96,6 +115,37 @@ Deno.serve(async (req) => {
       });
     }
 
+    const imapHost = String(updates.imap_host ?? account.imap_host ?? "").trim();
+    const imapPort = typeof updates.imap_port === "number" ? updates.imap_port : (account.imap_port ?? 993);
+    const imapTls = typeof updates.imap_use_tls === "boolean" ? updates.imap_use_tls : (account.imap_use_tls !== false);
+    const imapUser = String(updates.imap_username ?? account.imap_username ?? account.email_address).trim().toLowerCase();
+    const imapPass = passwordChanged
+      ? newPassword
+      : normalizeMailboxPassword(decryptPassword(account.imap_password_encrypted ?? ""));
+
+    const hostChanged = imapHost !== String(account.imap_host ?? "").trim();
+    const credsChanged = passwordChanged || hostChanged
+      || (typeof updates.imap_port === "number" && updates.imap_port !== account.imap_port)
+      || (typeof updates.imap_use_tls === "boolean" && updates.imap_use_tls !== account.imap_use_tls);
+
+    if (account.provider_type === "imap" && credsChanged && imapHost && imapPass) {
+      try {
+        const tested = await testImapConnection(imapHost, imapPort, imapTls, imapUser, imapPass);
+        updates.imap_host = tested.imap_host;
+        updates.imap_port = tested.imap_port;
+        updates.imap_use_tls = tested.imap_use_tls;
+        updates.smtp_host = tested.smtp_host;
+        updates.sync_status = "idle";
+        updates.last_sync_error = null;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return new Response(JSON.stringify({ ok: false, error: msg }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
     const { error: upErr } = await supabase
       .from("email_accounts")
       .update(updates)
@@ -104,7 +154,12 @@ Deno.serve(async (req) => {
 
     if (upErr) throw new Error(upErr.message);
 
-    return new Response(JSON.stringify({ ok: true, account_id: account.id }), {
+    return new Response(JSON.stringify({
+      ok: true,
+      account_id: account.id,
+      resolved_imap_host: updates.imap_host ?? account.imap_host,
+      resolved_smtp_host: updates.smtp_host ?? account.smtp_host,
+    }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {

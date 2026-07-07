@@ -1,6 +1,7 @@
 // Encrypt and store IMAP/SMTP credentials server-side. Plaintext password never persisted.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { normalizeMailboxPassword } from "../_shared/mail-credentials.ts";
+import { testImapConnection } from "../_shared/imap-connect.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -62,6 +63,27 @@ Deno.serve(async (req) => {
       });
     }
 
+    const imapPort = imap_port ?? 993;
+    const imapTls = imap_use_tls !== false;
+    let resolvedImapHost = String(imap_host).trim();
+    let resolvedSmtpHost = String(smtp_host).trim();
+    let resolvedImapPort = imapPort;
+    let resolvedImapTls = imapTls;
+
+    try {
+      const tested = await testImapConnection(resolvedImapHost, resolvedImapPort, resolvedImapTls, imapUser, imapPass);
+      resolvedImapHost = tested.imap_host;
+      resolvedImapPort = tested.imap_port;
+      resolvedImapTls = tested.imap_use_tls;
+      resolvedSmtpHost = tested.smtp_host;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return new Response(JSON.stringify({ ok: false, error: msg }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const { data: account, error } = await supabase.from("email_accounts").insert({
       user_id: user.id,
       email_address: emailTrim,
@@ -69,12 +91,12 @@ Deno.serve(async (req) => {
       color: color ?? "#3b82f6",
       provider_type: "imap",
       sync_status: "idle",
-      imap_host,
-      imap_port: imap_port ?? 993,
+      imap_host: resolvedImapHost,
+      imap_port: resolvedImapPort,
       imap_username: imapUser,
       imap_password_encrypted: encryptPassword(imapPass),
-      imap_use_tls: imap_use_tls !== false,
-      smtp_host,
+      imap_use_tls: resolvedImapTls,
+      smtp_host: resolvedSmtpHost,
       smtp_port: smtp_port ?? 465,
       smtp_username: smtpUser,
       smtp_password_encrypted: encryptPassword(smtpPass),
@@ -82,7 +104,12 @@ Deno.serve(async (req) => {
 
     if (error) throw new Error(error.message);
 
-    return new Response(JSON.stringify({ ok: true, account_id: account.id }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({
+      ok: true,
+      account_id: account.id,
+      resolved_imap_host: resolvedImapHost,
+      resolved_smtp_host: resolvedSmtpHost,
+    }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("account-credentials error:", msg);

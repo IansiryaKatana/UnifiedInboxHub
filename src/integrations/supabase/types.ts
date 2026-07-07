@@ -320,22 +320,28 @@ export type Database = {
       }
       profiles: {
         Row: {
+          access_expires_at: string | null
           avatar_url: string | null
           created_at: string
+          created_by_admin_id: string | null
           display_name: string | null
           id: string
           updated_at: string
         }
         Insert: {
+          access_expires_at?: string | null
           avatar_url?: string | null
           created_at?: string
+          created_by_admin_id?: string | null
           display_name?: string | null
           id: string
           updated_at?: string
         }
         Update: {
+          access_expires_at?: string | null
           avatar_url?: string | null
           created_at?: string
+          created_by_admin_id?: string | null
           display_name?: string | null
           id?: string
           updated_at?: string
@@ -365,6 +371,19 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      delete_email_account_data_batch: {
+        Args: {
+          p_account_id: string
+        }
+        Returns: Json
+      }
+      extend_user_access: {
+        Args: {
+          _until: string
+          _user_id: string
+        }
+        Returns: undefined
+      }
       get_inbox_threads_enriched: {
         Args: {
           p_limit?: number
@@ -377,6 +396,18 @@ export type Database = {
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
+      is_admin: {
+        Args: {
+          _user_id: string
+        }
+        Returns: boolean
+      }
+      user_has_active_access: {
+        Args: {
           _user_id: string
         }
         Returns: boolean

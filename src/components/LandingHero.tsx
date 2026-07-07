@@ -46,7 +46,7 @@ export const LandingHero = () => {
               size="lg"
               className="h-11 rounded-md bg-neutral-950 px-7 text-[14px] font-medium text-white shadow-none hover:bg-neutral-900 md:h-12 md:px-8 md:text-[15px]"
             >
-              <Link to="/auth">Get started</Link>
+              <Link to="/auth">Sign in</Link>
             </Button>
             <InstallAppButton />
           </div>
